@@ -1,0 +1,231 @@
+# ============================================================
+#  Hallucination Benchmark — Ollama Edition
+#  Just add any model name from https://ollama.com/library
+#  No API keys. No GPU setup. Just: ollama pull <model>
+# ============================================================
+
+# ── Ollama server ─────────────────────────────────────────────
+ollama:
+  host: "http://localhost:11434"   # change if Ollama runs remotely
+  timeout: 120                      # seconds per request
+
+# ── Models to benchmark ───────────────────────────────────────
+# Focused list: Google, Microsoft, Llama (Meta), DeepSeek, Qwen, OpenAI OSS
+# Format:  name: "display-name"
+#          model: "ollama-model-tag"
+#          auto_pull: true   ← automatically pulls if not installed
+models:
+  # ── Meta / Llama family ──────────────────────────────────
+  - name: "llama3.2-1b"
+    model: "llama3.2:1b"
+    family: "meta"
+    auto_pull: false
+
+  - name: "llama3.2-3b"
+    model: "llama3.2:3b"
+    family: "meta"
+    auto_pull: false
+
+  - name: "llama3.1-8b"
+    model: "llama3.1:8b"
+    family: "meta"
+    auto_pull: false
+
+  - name: "llama3.3-70b"
+    model: "llama3.3:70b"
+    family: "meta"
+    auto_pull: false
+
+  # ── Google family ─────────────────────────────────────────
+  - name: "gemma2-2b"
+    model: "gemma2:2b"
+    family: "google"
+    auto_pull: false
+
+  - name: "gemma2-9b"
+    model: "gemma2:9b"
+    family: "google"
+    auto_pull: false
+
+  - name: "gemma2-27b"
+    model: "gemma2:27b"
+    family: "google"
+    auto_pull: false
+
+  - name: "gemma3-1b"
+    model: "gemma3:1b"
+    family: "google"
+    auto_pull: false
+
+  - name: "gemma3-4b"
+    model: "gemma3:4b"
+    family: "google"
+    auto_pull: false
+
+  - name: "gemma3-12b"
+    model: "gemma3:12b"
+    family: "google"
+    auto_pull: false
+
+  - name: "gemma3-27b"
+    model: "gemma3:27b"
+    family: "google"
+    auto_pull: false
+
+  - name: "gemini-3-flash-preview"
+    model: "gemini-3-flash-preview"
+    family: "google"
+    auto_pull: false
+
+  # ── Microsoft / Phi family ────────────────────────────────
+  - name: "phi4-mini"
+    model: "phi4-mini:3.8b"
+    family: "microsoft"
+    auto_pull: false
+
+  - name: "phi4-14b"
+    model: "phi4:14b"
+    family: "microsoft"
+    auto_pull: false
+
+  - name: "phi3.5-mini"
+    model: "phi3.5:3.8b"
+    family: "microsoft"
+    auto_pull: false
+
+  # ── Qwen family ────────────────────────────────────────────
+  - name: "qwen2.5-7b"
+    model: "qwen2.5:7b"
+    family: "qwen"
+    auto_pull: false
+
+  - name: "qwen2.5-14b"
+    model: "qwen2.5:14b"
+    family: "qwen"
+    auto_pull: false
+
+  - name: "qwen2.5-32b"
+    model: "qwen2.5:32b"
+    family: "qwen"
+    auto_pull: false
+
+  - name: "qwen2.5-72b"
+    model: "qwen2.5:72b"
+    family: "qwen"
+    auto_pull: false
+
+  - name: "qwen3-8b"
+    model: "qwen3:8b"
+    family: "qwen"
+    auto_pull: false
+
+  - name: "qwen3-14b"
+    model: "qwen3:14b"
+    family: "qwen"
+    auto_pull: false
+
+  - name: "qwen3-32b"
+    model: "qwen3:32b"
+    family: "qwen"
+    auto_pull: false
+
+  # ── DeepSeek family ───────────────────────────────────────
+  - name: "deepseek-r1-7b"
+    model: "deepseek-r1:7b"
+    family: "deepseek"
+    auto_pull: false
+
+  - name: "deepseek-r1-14b"
+    model: "deepseek-r1:14b"
+    family: "deepseek"
+    auto_pull: false
+
+  - name: "deepseek-r1-32b"
+    model: "deepseek-r1:32b"
+    family: "deepseek"
+    auto_pull: false
+
+  - name: "deepseek-v3.2"
+    model: "deepseek-v3.2"
+    family: "deepseek"
+    auto_pull: false
+
+  # ── OpenAI OSS family ─────────────────────────────────────
+  - name: "gpt-oss-20b"
+    model: "gpt-oss:20b"
+    family: "openai"
+    auto_pull: false
+
+  - name: "gpt-oss-120b"
+    model: "gpt-oss:120b"
+    family: "openai"
+    auto_pull: false
+
+# ── Which models to actually run ──────────────────────────────
+# Set to [] to run ALL models listed above (that are installed)
+# Or list specific names from this filtered top-company list
+selected_models: ["llama3.2-3b", "gemma3-27b", "phi4-14b", "qwen2.5-7b", "deepseek-r1-7b", "gpt-oss-20b", "gemini-3-flash-preview"]
+
+# ── Datasets ──────────────────────────────────────────────────
+datasets:
+  - name: "halueval_qa"
+    source: "hf"
+    hf_path: "pminervini/HaluEval"
+    hf_subset: "qa_samples"
+    split: "data"
+    max_samples: 400
+    context_col: "knowledge"
+    question_col: "question"
+    answer_col: "hallucinated_answer"
+    label_col: "right_answer"
+
+  - name: "ragbench_techqa"
+    source: "hf"
+    hf_path: "rungalileo/ragbench"
+    hf_subset: "techqa"
+    split: "test"
+    max_samples: 400
+    context_col: "documents"
+    question_col: "question"
+    answer_col: "response"
+    label_col: "adherence_score"
+
+  - name: "synthetic"
+    source: "synthetic"
+    max_samples: 400
+
+# ── Detection Methods ─────────────────────────────────────────
+detectors:
+  llm_based:
+    enabled: true
+    threshold: 0.5
+
+  semantic_similarity:
+    enabled: true
+    threshold: 0.35
+    embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+
+  bert_stochastic:
+    enabled: true
+    threshold: 0.75
+    n_samples: 5
+    temperature: 1.0
+
+  token_similarity:
+    enabled: true
+    bleu_threshold: 0.25
+    intersection_threshold: 0.35
+    rouge_threshold: 0.30
+
+# ── Benchmark settings ────────────────────────────────────────
+benchmark:
+  output_dir: "results"
+  save_intermediate: true
+  seed: 42
+  request_timeout: 120
+
+# ── Logging ───────────────────────────────────────────────────
+logging:
+  level: "INFO"
+  save_logs: true
+  log_file: "results/benchmark.log"
