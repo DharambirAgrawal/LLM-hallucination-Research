@@ -1,148 +1,186 @@
 """
-Evaluator
-=========
-Computes per-method, per-model, per-dataset metrics:
-  - Accuracy, Precision, Recall, F1
-  - AUC-ROC
-  - Confusion matrix stats
-  - Latency statistics
+Evaluator — Reduction Experiment
+=================================
+Computes reducer-performance metrics from the results DataFrame.
+
+For each (model × reducer) combination, computes:
+  - Mean score per detector (lower = better)
+  - Score reduction vs baseline (how much did this reducer help?)
+  - Win rate: % of samples where reducer scored lower than baseline
+  - Accuracy: % of samples classified as factual (score < threshold)
+
+Since we don't have ground-truth hallucination labels (we removed them
+in our workflow), we compare each reducer's scores against the baseline
+scores to measure how effective each reduction method is.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
 from loguru import logger
 
 
-# Detection method columns present in the results DataFrame
-METHODS = {
-    "token_similarity":   ("token_score",    "token_pred"),
-    "semantic_similarity": ("semantic_score", "semantic_pred"),
-    "llm_based":          ("llm_score",      "llm_pred"),
-    "bert_stochastic":    ("bert_score",     "bert_pred"),
-    "ensemble":           ("ensemble_score", "ensemble_pred"),
-}
+# Score columns the detectors produce
+SCORE_COLS = ["token_score", "semantic_score", "bert_score", "llm_score"]
+PRED_COLS  = ["token_pred",  "semantic_pred",  "bert_pred",  "llm_pred"]
 
 
 class Evaluator:
-    """Computes hallucination detection metrics from a results DataFrame."""
+    """Computes reduction-experiment metrics from a results DataFrame."""
 
     def evaluate(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Compute metrics for every (model, dataset, method) combination.
-        Returns a summary DataFrame.
+        Compute metrics for every (model × dataset × reducer) combination.
+
+        Returns a summary DataFrame with one row per combination, containing
+        mean scores across all samples for each detector.
         """
-        rows = []
+        # Only use score columns that actually exist in the results
+        score_cols = [c for c in SCORE_COLS if c in df.columns]
+        pred_cols  = [c for c in PRED_COLS  if c in df.columns]
 
-        for model_name, model_df in df.groupby("model"):
-            for dataset_name, ds_df in model_df.groupby("dataset"):
-                y_true = ds_df["gt_hallucinated"].astype(bool).values
+        if not score_cols:
+            logger.warning("No detector score columns found in results.")
+            return pd.DataFrame()
 
-                for method, (score_col, pred_col) in METHODS.items():
-                    if score_col not in ds_df.columns:
-                        continue
-                    valid = ds_df[[score_col, pred_col]].dropna()
-                    if len(valid) == 0:
-                        continue
+        # Average scores per (model, dataset, reducer)
+        summary = (
+            df.groupby(["model", "dataset", "reducer"])[score_cols]
+              .mean()
+              .round(4)
+              .reset_index()
+        )
 
-                    idx     = valid.index
-                    y_score = valid[score_col].values.astype(float)
-                    y_pred  = valid[pred_col].astype(bool).values
-                    y_gt    = y_true[ds_df.index.get_indexer(idx)]
+        # Also compute "accuracy" per detector per combination:
+        # % of samples where the detector labeled the answer as NOT hallucinated
+        # (i.e., pred == False means "factual")
+        for pred_col in pred_cols:
+            score_col = pred_col.replace("_pred", "_score")
+            if pred_col not in df.columns:
+                continue
+            acc = (
+                df.groupby(["model", "dataset", "reducer"])[pred_col]
+                  .apply(lambda x: (~x.astype(bool)).mean())
+                  .round(4)
+                  .reset_index(name=score_col.replace("_score", "_accuracy"))
+            )
+            summary = summary.merge(
+                acc, on=["model", "dataset", "reducer"], how="left"
+            )
 
-                    metrics = self._compute_metrics(y_gt, y_pred, y_score)
-                    metrics.update({
-                        "model":   model_name,
-                        "dataset": dataset_name,
-                        "method":  method,
-                        "n_samples": len(valid),
-                    })
+        # Sample count per combination
+        n_samples = (
+            df.groupby(["model", "dataset", "reducer"])
+              .size()
+              .reset_index(name="n_samples")
+        )
+        summary = summary.merge(n_samples, on=["model", "dataset", "reducer"])
 
-                    # Latency (only meaningful for LLM-based / BERT / Ensemble)
-                    if "latency_s" in ds_df.columns:
-                        metrics["mean_latency_s"] = round(
-                            float(ds_df["latency_s"].mean()), 3
-                        )
+        # Mean latency
+        if "latency_s" in df.columns:
+            latency = (
+                df.groupby(["model", "dataset", "reducer"])["latency_s"]
+                  .mean()
+                  .round(3)
+                  .reset_index(name="mean_latency_s")
+            )
+            summary = summary.merge(
+                latency, on=["model", "dataset", "reducer"], how="left"
+            )
 
-                    rows.append(metrics)
-
-        summary = pd.DataFrame(rows)
-        # Reorder columns
-        front = ["model", "dataset", "method", "n_samples",
-                 "accuracy", "precision", "recall", "f1", "auc_roc"]
-        rest  = [c for c in summary.columns if c not in front]
-        summary = summary[[c for c in front if c in summary.columns] + rest]
         return summary
 
-    # ── per-model aggregate ───────────────────────────────────
+    # ── reducer comparison ────────────────────────────────────
 
-    def model_summary(self, summary_df: pd.DataFrame) -> pd.DataFrame:
-        """Average metrics across datasets for each (model, method)."""
-        numeric = ["accuracy", "precision", "recall", "f1", "auc_roc"]
-        cols    = [c for c in numeric if c in summary_df.columns]
+    def reducer_comparison(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Compute score reduction per reducer vs baseline.
+
+        For each (model × sample), we compute:
+            reduction = baseline_score - reducer_score
+        A positive reduction means the reducer lowered the hallucination
+        score (good). A negative reduction means it got worse.
+
+        Returns a DataFrame with average reductions per (model × reducer × detector).
+        """
+        score_cols = [c for c in SCORE_COLS if c in df.columns]
+        if not score_cols:
+            return pd.DataFrame()
+
+        # Separate baseline from reducers
+        baseline_df = df[df["reducer"] == "baseline"].copy()
+        reducer_df  = df[df["reducer"] != "baseline"].copy()
+
+        if len(baseline_df) == 0 or len(reducer_df) == 0:
+            logger.warning("Cannot compute reducer comparison: missing baseline or reducer rows.")
+            return pd.DataFrame()
+
+        # Index baseline rows by (model, sample_id) for easy lookup
+        baseline_lookup = baseline_df.set_index(["model", "sample_id"])
+
+        # For each reducer row, subtract the corresponding baseline score
+        rows = []
+        for _, r in reducer_df.iterrows():
+            key = (r["model"], r["sample_id"])
+            if key not in baseline_lookup.index:
+                continue
+            b = baseline_lookup.loc[key]
+            row = {
+                "model":     r["model"],
+                "sample_id": r["sample_id"],
+                "reducer":   r["reducer"],
+            }
+            for col in score_cols:
+                if col in b and col in r:
+                    b_val = b[col] if not isinstance(b[col], pd.Series) else b[col].iloc[0]
+                    row[f"{col}_reduction"] = (
+                        float(b_val) - float(r[col])
+                        if pd.notna(b_val) and pd.notna(r[col])
+                        else None
+                    )
+            rows.append(row)
+
+        reduction_df = pd.DataFrame(rows)
+
+        # Average reductions per (model × reducer)
+        reduction_cols = [c for c in reduction_df.columns if c.endswith("_reduction")]
+        summary = (
+            reduction_df.groupby(["model", "reducer"])[reduction_cols]
+                        .mean()
+                        .round(4)
+                        .reset_index()
+        )
+
+        # Win rate: % of samples where reducer beat baseline (reduction > 0)
+        for col in reduction_cols:
+            wins = (
+                reduction_df.groupby(["model", "reducer"])[col]
+                            .apply(lambda x: (x > 0).mean())
+                            .round(4)
+                            .reset_index(name=col.replace("_reduction", "_win_rate"))
+            )
+            summary = summary.merge(wins, on=["model", "reducer"], how="left")
+
+        return summary
+
+    # ── simple per-reducer table (averaged across models) ────
+
+    def reducer_summary(self, summary_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Average scores per reducer across all models and datasets.
+        Useful for the final overall comparison table.
+        """
+        score_cols = [c for c in SCORE_COLS if c in summary_df.columns]
+        if not score_cols:
+            return pd.DataFrame()
+
         return (
             summary_df
-            .groupby(["model", "method"])[cols]
+            .groupby("reducer")[score_cols]
             .mean()
             .round(4)
             .reset_index()
-            .sort_values(["method", "f1"], ascending=[True, False])
-        )
-
-    # ── metrics ───────────────────────────────────────────────
-
-    @staticmethod
-    def _compute_metrics(
-        y_true: np.ndarray,
-        y_pred: np.ndarray,
-        y_score: np.ndarray,
-    ) -> dict:
-        from sklearn.metrics import (
-            accuracy_score, precision_score, recall_score,
-            f1_score, roc_auc_score, confusion_matrix,
-        )
-
-        # Guard: need both classes for AUC
-        acc  = float(accuracy_score(y_true, y_pred))
-        prec = float(precision_score(y_true, y_pred, zero_division=0))
-        rec  = float(recall_score(y_true, y_pred, zero_division=0))
-        f1   = float(f1_score(y_true, y_pred, zero_division=0))
-
-        try:
-            auc = float(roc_auc_score(y_true, y_score))
-        except ValueError:
-            auc = float("nan")
-
-        tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[False, True]).ravel()
-
-        return {
-            "accuracy":  round(acc,  4),
-            "precision": round(prec, 4),
-            "recall":    round(rec,  4),
-            "f1":        round(f1,   4),
-            "auc_roc":   round(auc,  4),
-            "tp": int(tp), "fp": int(fp),
-            "tn": int(tn), "fn": int(fn),
-        }
-
-    # ── method comparison table (mirrors the AWS blog table) ─
-
-    @staticmethod
-    def method_comparison_table(summary_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Build a concise table that mirrors Table 1 in the AWS blog post:
-        | Method | Accuracy | Precision | Recall | F1 | AUC |
-        Averaged across all models and datasets.
-        """
-        numeric = ["accuracy", "precision", "recall", "f1", "auc_roc"]
-        cols    = [c for c in numeric if c in summary_df.columns]
-        return (
-            summary_df
-            .groupby("method")[cols]
-            .mean()
-            .round(4)
-            .reset_index()
-            .sort_values("accuracy", ascending=False)
+            .sort_values(score_cols[0])  # Sort by first score column (lower = better)
         )

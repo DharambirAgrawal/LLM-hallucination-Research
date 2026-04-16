@@ -173,27 +173,15 @@ datasets:
     hf_path: "pminervini/HaluEval"
     hf_subset: "qa_samples"
     split: "data"
-    max_samples: 400
+    max_samples: 50                              # Start small, scale up later
     context_col: "knowledge"
     question_col: "question"
-    answer_col: "hallucinated_answer"
-    label_col: "right_answer"
-
-  - name: "ragbench_techqa"
-    source: "hf"
-    hf_path: "rungalileo/ragbench"
-    hf_subset: "techqa"
-    split: "test"
-    max_samples: 400
-    context_col: "documents"
-    question_col: "question"
-    answer_col: "response"
-    label_col: "adherence_score"
-
+    right_answer_col: "right_answer"
+    hallucinated_answer_col: "hallucinated_answer"
+ 
   - name: "synthetic"
     source: "synthetic"
-    max_samples: 400
-
+    max_samples: 50
 # ── Detection Methods ─────────────────────────────────────────
 detectors:
   llm_based:
@@ -216,6 +204,34 @@ detectors:
     bleu_threshold: 0.25
     intersection_threshold: 0.35
     rouge_threshold: 0.30
+
+reducers:
+  # No reduction - just ask the question directly.
+  # This gives us the baseline hallucination scores to compare against.
+  baseline:
+    enabled: true
+ 
+  # Retrieval-Augmented Generation
+  # Provides the reference passage alongside the question
+  rag:
+    enabled: true
+ 
+  # Constrained Decoding
+  # Uses tight generation parameters to force conservative outputs
+  constrained_decoding:
+    enabled: true
+    temperature: 0.1
+    top_p: 0.3
+    top_k: 5
+ 
+  # Self-Verification
+  # Generates answer, then asks model to verify it
+  self_verification:
+    enabled: true
+ 
+  # ----- Phase 3: Novel method (to be implemented) -----
+  # brier_calibration:
+  #   enabled: false
 
 # ── Benchmark settings ────────────────────────────────────────
 benchmark:
