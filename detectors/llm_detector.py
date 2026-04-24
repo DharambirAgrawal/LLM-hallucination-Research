@@ -37,37 +37,45 @@ class LLMDetector:
 
     # Few-shot prompt (mirroring the AWS blog's prompt design)
     JUDGE_PROMPT = """\
-You are an expert assistant helping to check if a statement is based on the provided context.
-
-Your task: Read the Context and the Statement. Return ONLY a single float between 0 and 1.
-- 0.0 = the statement is fully supported by the context (factual)
-- 1.0 = the statement contradicts or is not supported by the context (hallucinated)
-- Values between 0 and 1 reflect your level of uncertainty.
-
+You are an expert fact-checker. Your task is to determine whether a Generated Answer
+conveys the same core factual information as the Correct Answer.
+ 
+Return ONLY a single float between 0 and 1:
+- 0.0 = Generated Answer matches the Correct Answer (factual)
+- 1.0 = Generated Answer contradicts or is completely different from the Correct Answer (hallucinated)
+- Values in between reflect partial matches or uncertainty.
+ 
+Synonyms, rephrasings, and added details are acceptable as long as the core fact is right.
+For example, "ethanol" and "alcohol" should score low (they mean the same thing).
+ 
 DO NOT explain your reasoning. Output ONLY the number.
-
+ 
 --- EXAMPLES ---
-
-Context: Amazon Web Services (AWS) is a subsidiary of Amazon providing cloud computing services.
-Statement: AWS is Amazon's cloud computing division.
+ 
+Correct Answer: Arthur's Magazine
+Generated Answer: Arthur's Magazine was started first in 1844.
 Score: 0.05
-
-Context: Amazon Web Services (AWS) is a subsidiary of Amazon providing cloud computing services.
-Statement: AWS was founded in 1985 by Bill Gates.
-Score: 0.98
-
-Context: The Eiffel Tower is located in Paris, France. It was built between 1887 and 1889.
-Statement: The Eiffel Tower is in London.
-Score: 0.97
-
-Context: The Eiffel Tower is located in Paris, France. It was built between 1887 and 1889.
-Statement: The Eiffel Tower was constructed in the late 1880s.
-Score: 0.04
-
+ 
+Correct Answer: Arthur's Magazine
+Generated Answer: First for Women was started first.
+Score: 0.95
+ 
+Correct Answer: Delhi
+Generated Answer: The head office is in New Delhi, India.
+Score: 0.08
+ 
+Correct Answer: alcohol
+Generated Answer: Cadmium chloride is slightly soluble in ethanol.
+Score: 0.10
+ 
+Correct Answer: American
+Generated Answer: James Henry Miller's wife was Canadian.
+Score: 0.92
+ 
 --- YOUR TASK ---
-
-Context: {context}
-Statement: {statement}
+ 
+Correct Answer: {correct_answer}
+Generated Answer: {generated_answer}
 Score:"""
 
     def __init__(
@@ -80,11 +88,27 @@ Score:"""
 
     # ── public API ────────────────────────────────────────────
 
-    def detect(self, context: str, answer: str) -> LLMDetectionResult:
-        """Score a single (context, answer) pair."""
+    def detect(self, correct_answer: str, generated_answer: str) -> LLMDetectionResult:
+        """
+        Score how well the generated answer matches the correct answer.
+ 
+        Parameters
+        ----------
+        correct_answer : str
+            The ground-truth correct answer from the dataset.
+        generated_answer : str
+            The answer produced by the model (after applying any reducer).
+ 
+        Returns
+        -------
+        LLMDetectionResult with:
+          - score: 0.0 (match) to 1.0 (hallucinated)
+          - is_hallucinated: True if score >= threshold
+          - raw_response: the raw output from the judge model
+        """
         prompt = self.JUDGE_PROMPT.format(
-            context=context.strip(),
-            statement=answer.strip(),
+            correct_answer=correct_answer.strip(),
+            generated_answer=generated_answer.strip(),
         )
         try:
             raw = self.judge_model.generate(prompt, temperature=0.0, max_new_tokens=16)
@@ -92,7 +116,7 @@ Score:"""
         except Exception as exc:
             logger.warning(f"LLMDetector error: {exc}")
             raw, score = "", 0.5
-
+ 
         return LLMDetectionResult(
             score=score,
             is_hallucinated=score >= self.threshold,
@@ -100,13 +124,15 @@ Score:"""
         )
 
     def detect_batch(
-        self, contexts: list[str], answers: list[str]
+        self, correct_answers: list[str], generated_answers: list[str]
     ) -> list[LLMDetectionResult]:
+        """Batch version of detect() - compares each generated answer to its correct answer."""
         prompts = [
             self.JUDGE_PROMPT.format(
-                context=ctx.strip(), statement=ans.strip()
+                correct_answer=correct.strip(),
+                generated_answer=gen.strip(),
             )
-            for ctx, ans in zip(contexts, answers)
+            for correct, gen in zip(correct_answers, generated_answers)
         ]
         try:
             raws = self.judge_model.generate_batch(
@@ -115,7 +141,7 @@ Score:"""
         except Exception as exc:
             logger.warning(f"LLMDetector batch error: {exc}")
             raws = [""] * len(prompts)
-
+ 
         return [
             LLMDetectionResult(
                 score=self._parse(r),

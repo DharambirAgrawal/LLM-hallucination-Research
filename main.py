@@ -1,32 +1,38 @@
 #!/usr/bin/env python3
 """
-Hallucination Detection Benchmark — Ollama Edition
-====================================================
-
+LLM Hallucination Reduction Experiment — Ollama Edition
+========================================================
+ 
+Test whether different reduction methods (RAG, Constrained Decoding,
+Self-Verification) actually reduce hallucinations in LLM outputs.
+ 
+Workflow:
+  1. For each question in the dataset, model generates a baseline answer
+  2. Detectors score that answer against the correct answer
+  3. For each reducer, model generates a new answer using that strategy
+  4. Detectors score the new answer
+  5. Compare score changes to see which reducer helps most
+ 
 Run any LLM through Ollama. No API keys. No GPU driver setup.
-Just install Ollama, pull models, and benchmark.
-
+Just install Ollama, pull models, and run the experiment.
+ 
 QUICK START
 -----------
   # 1. Install Ollama
   curl -fsSL https://ollama.com/install.sh | sh
-
+ 
   # 2. Pull any models you want to test
-  ollama pull llama3.2:3b
-  ollama pull mistral:7b
-  ollama pull gemma3:4b
-  ollama pull phi4:14b
-  ollama pull qwen2.5:7b
   ollama pull deepseek-r1:7b
-
-  # 3. Run the benchmark
+  ollama pull qwen2.5:7b
+ 
+  # 3. Run the experiment
   python main.py
-
+ 
 COMMANDS
 --------
   python main.py                                # run with config.yaml defaults
-  python main.py --models llama3.2-3b mistral-7b   # specific models
-  python main.py --pull llama3.2:3b mistral:7b     # pull models then run
+  python main.py --models deepseek-r1-7b        # specific models
+  python main.py --pull deepseek-r1:7b          # pull models then run
   python main.py --list-models                  # show all installed Ollama models
   python main.py --list-available               # show all models in config.yaml
   python main.py --datasets synthetic           # single dataset
@@ -35,19 +41,19 @@ COMMANDS
   python main.py --dry-run                      # check setup only
   python main.py --host http://192.168.1.10:11434  # remote Ollama server
 """
-
+ 
 import argparse
 import sys
 from pathlib import Path
-
+ 
 import yaml
 from loguru import logger
-
-
+ 
+ 
 # ─────────────────────────────────────────────────────────────
 # Argument parsing
 # ─────────────────────────────────────────────────────────────
-
+ 
 def parse_args():
     p = argparse.ArgumentParser(
         description="Hallucination Detection Benchmark (Ollama Edition)",
@@ -64,7 +70,7 @@ def parse_args():
                    help="Override output directory")
     p.add_argument("--host",     default=None,
                    help="Ollama server URL (default: http://localhost:11434)")
-
+ 
     # Utility commands
     p.add_argument("--list-models",     action="store_true",
                    help="List all installed Ollama models and exit")
@@ -72,7 +78,7 @@ def parse_args():
                    help="List all models defined in config.yaml and exit")
     p.add_argument("--pull",            nargs="+", metavar="TAG",
                    help="Pull model tags via Ollama then run benchmark (e.g. llama3.2:3b)")
-
+ 
     # Speed flags
     p.add_argument("--quick",    action="store_true",
                    help="Quick mode: 20 synthetic samples only")
@@ -85,12 +91,12 @@ def parse_args():
     p.add_argument("--dry-run",  action="store_true",
                    help="Check setup and model availability, then exit")
     return p.parse_args()
-
-
+ 
+ 
 # ─────────────────────────────────────────────────────────────
 # Logging
 # ─────────────────────────────────────────────────────────────
-
+ 
 def setup_logging(config: dict):
     log_cfg = config.get("logging", {})
     level   = log_cfg.get("level", "INFO")
@@ -105,24 +111,24 @@ def setup_logging(config: dict):
         lf.parent.mkdir(parents=True, exist_ok=True)
         logger.add(lf, level="DEBUG",
                    format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {message}")
-
-
+ 
+ 
 # ─────────────────────────────────────────────────────────────
 # Utility: list models
 # ─────────────────────────────────────────────────────────────
-
+ 
 def cmd_list_installed(host: str):
     """Print all Ollama-installed models."""
     from models.model_factory import ModelFactory
     ModelFactory.show_available(host)
-
-
+ 
+ 
 def cmd_list_available(config: dict):
     """Print all models defined in config.yaml."""
     from rich.console import Console
     from rich.table import Table
     from rich import box
-
+ 
     c = Console()
     t = Table(
         title="Models defined in config.yaml",
@@ -132,7 +138,7 @@ def cmd_list_available(config: dict):
     t.add_column("Tag",    style="yellow")
     t.add_column("Family", style="magenta")
     t.add_column("Auto-pull", justify="center")
-
+ 
     for m in config.get("models", []):
         t.add_row(
             m["name"],
@@ -143,19 +149,19 @@ def cmd_list_available(config: dict):
     c.print(t)
     c.print("\n[dim]To add a model: edit config.yaml → models section.[/dim]")
     c.print("[dim]Find model tags at: https://ollama.com/library[/dim]")
-
-
+ 
+ 
 # ─────────────────────────────────────────────────────────────
 # Utility: pull models
 # ─────────────────────────────────────────────────────────────
-
+ 
 def cmd_pull(tags: list[str], host: str):
     """Pull one or more model tags via Ollama."""
     import ollama as _ollama
     from rich.console import Console
     c = Console()
     client = _ollama.Client(host=host)
-
+ 
     for tag in tags:
         c.print(f"\n[cyan]Pulling {tag}...[/cyan]")
         try:
@@ -172,12 +178,12 @@ def cmd_pull(tags: list[str], host: str):
             c.print(f"[green]  ✓ {tag} ready[/green]")
         except Exception as e:
             c.print(f"[red]  ✗ Failed to pull {tag}: {e}[/red]")
-
-
+ 
+ 
 # ─────────────────────────────────────────────────────────────
 # Ollama connectivity check
 # ─────────────────────────────────────────────────────────────
-
+ 
 def check_ollama(host: str) -> bool:
     """Returns True if Ollama is reachable."""
     try:
@@ -195,24 +201,24 @@ def check_ollama(host: str) -> bool:
             f"    ➜  Windows/Mac: download from https://ollama.com/download"
         )
         return False
-
-
+ 
+ 
 # ─────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────
-
+ 
 def main():
     args = parse_args()
-
+ 
     # Load config
     cfg_path = Path(args.config)
     if not cfg_path.exists():
         print(f"ERROR: Config file not found: {cfg_path}")
         sys.exit(1)
-
+ 
     with open(cfg_path) as f:
         config = yaml.safe_load(f)
-
+ 
     # Apply CLI overrides
     if args.host:
         config.setdefault("ollama", {})["host"] = args.host
@@ -233,29 +239,29 @@ def main():
         config["datasets"] = [
             d for d in config.get("datasets", []) if d["name"] in args.datasets
         ]
-
+ 
     setup_logging(config)
     host = config.get("ollama", {}).get("host", "http://localhost:11434")
-
+ 
     # ── Utility commands ──────────────────────────────────────
     if args.list_models:
         cmd_list_installed(host)
         return
-
+ 
     if args.list_available:
         cmd_list_available(config)
         return
-
+ 
     # ── Banner ────────────────────────────────────────────────
     logger.info("=" * 65)
     logger.info("  🔬 Hallucination Detection Benchmark — Ollama Edition")
     logger.info("=" * 65)
-
+ 
     # ── Ollama check ──────────────────────────────────────────
     logger.info("\n[1/6] Checking Ollama connection...")
     if not check_ollama(host):
         sys.exit(1)
-
+ 
     # ── Pull if requested ─────────────────────────────────────
     if args.pull:
         logger.info("\n[2/6] Pulling models...")
@@ -263,7 +269,7 @@ def main():
         # After pull, mark those as auto_pull=False (already pulled)
     else:
         logger.info("\n[2/6] (skipping pull — use --pull <tag> to pull models)")
-
+ 
     if args.dry_run:
         logger.info("\n[dry-run] Checking model availability...")
         from models.model_factory import ModelFactory
@@ -271,30 +277,30 @@ def main():
         logger.info(f"\n  Models that would run: {[m.name for m in models]}")
         logger.info("Dry run complete — exiting.")
         return
-
+ 
     # Deferred imports (after logging is set up)
     from data.datasets import DatasetLoader
     from models.model_factory import ModelFactory
     from benchmark.runner import BenchmarkRunner
     from benchmark.evaluator import Evaluator
     from benchmark.reporter import Reporter
-
+ 
     # ── Load datasets ─────────────────────────────────────────
     logger.info("\n[3/6] Loading datasets...")
     loader   = DatasetLoader(config, seed=config.get("benchmark", {}).get("seed", 42))
     datasets = loader.load_all()
-
+ 
     if not datasets:
         logger.error("No datasets loaded! Check config.yaml")
         sys.exit(1)
-
+ 
     total = sum(len(v) for v in datasets.values())
     logger.info(f"  Total: {total} samples across {len(datasets)} datasets")
-
+ 
     # ── Build models ──────────────────────────────────────────
     logger.info("\n[4/6] Registering models...")
     models = ModelFactory.build_all(config)
-
+ 
     if not models:
         logger.error(
             "No models available!\n"
@@ -303,7 +309,7 @@ def main():
             "  • Run: python main.py --pull llama3.2:3b mistral:7b"
         )
         sys.exit(1)
-
+ 
     # Print what we're about to run
     from rich.console import Console
     from rich.table import Table
@@ -316,67 +322,42 @@ def main():
     for m in models:
         t.add_row(m.name, m.config["model"], m.config.get("family", "?"))
     c.print(t)
-
+ 
     det_cfg = config.get("detectors", {})
-    enabled = [k for k, v in det_cfg.items() if v.get("enabled", True)]
-    logger.info(f"  Detectors: {', '.join(enabled)}")
+    enabled_det = [k for k, v in det_cfg.items() if v.get("enabled", True)]
+    logger.info(f"  Detectors: {', '.join(enabled_det)}")
+ 
+    red_cfg = config.get("reducers", {})
+    enabled_red = [k for k, v in red_cfg.items() if v.get("enabled", True)]
+    logger.info(f"  Reducers:  baseline, {', '.join(enabled_red)}")
     logger.info(f"  Datasets:  {', '.join(datasets.keys())}")
-
+ 
     # ── Run benchmark ─────────────────────────────────────────
-    logger.info("\n[5/6] Running benchmark...")
+    logger.info("\n[5/6] Running reduction experiment...")
     runner     = BenchmarkRunner(config)
     results_df = runner.run(models, datasets)
-
+ 
     # ── Evaluate & report ─────────────────────────────────────
-    logger.info("\n[6/6] Evaluating results...")
-    evaluator  = Evaluator()
-    summary_df = evaluator.evaluate(results_df)
-    comparison = evaluator.method_comparison_table(summary_df)
-    model_sum  = evaluator.model_summary(summary_df)
-
-    reporter = Reporter(output_dir=config.get("benchmark", {}).get("output_dir", "results"))
+    logger.info("\n[6/6] Evaluating and generating reports...")
+    evaluator = Evaluator()
+    summary_df   = evaluator.evaluate(results_df)
+    reduction_df = evaluator.reducer_comparison(results_df)
+ 
+    out_dir = config.get("benchmark", {}).get("output_dir", "results")
+    reporter = Reporter(output_dir=out_dir)
     reporter.print_summary(summary_df)
-    reporter.print_comparison_table(comparison)
-    reporter.save_charts(summary_df, results_df)
-    reporter.save_html_report(summary_df, results_df)
-    reporter.save_json_summary(summary_df)
-
-    # ── Final ranking table ───────────────────────────────────
-    c.rule("[bold yellow]🏆 Model Ranking by F1[/bold yellow]")
-    rt = Table(box=box.ROUNDED, header_style="bold cyan")
-    rt.add_column("Rank",     justify="center", style="dim")
-    rt.add_column("Model",    style="bold green")
-    rt.add_column("Family",   style="magenta")
-    rt.add_column("Method",   style="cyan")
-    rt.add_column("F1",       justify="right", style="bold yellow")
-    rt.add_column("Accuracy", justify="right")
-    rt.add_column("Recall",   justify="right")
-    rt.add_column("Precision",justify="right")
-
-    # Build family lookup
-    family_map = {m.name: m.config.get("family", "?") for m in models}
-
-    ranked = model_sum.sort_values("f1", ascending=False).reset_index(drop=True)
-    for i, row in ranked.iterrows():
-        rt.add_row(
-            str(i + 1),
-            row["model"],
-            family_map.get(row["model"], "?"),
-            row["method"],
-            f'{row.get("f1",        0):.4f}',
-            f'{row.get("accuracy",  0):.4f}',
-            f'{row.get("recall",    0):.4f}',
-            f'{row.get("precision", 0):.4f}',
-        )
-    c.print(rt)
-
-    out = Path(config.get("benchmark", {}).get("output_dir", "results"))
-    c.print(f"\n[bold green]✅ Benchmark complete![/bold green]")
-    c.print(f"  📄 HTML Report  → [cyan]{out / 'report.html'}[/cyan]")
-    c.print(f"  📊 Charts       → [cyan]{out}/*.png[/cyan]")
-    c.print(f"  📁 Raw CSV      → [cyan]{out / 'all_results.csv'}[/cyan]")
-    c.print(f"  📋 JSON Summary → [cyan]{out / 'summary.json'}[/cyan]")
-
-
+    reporter.print_reduction_table(reduction_df)
+    reporter.save_charts(summary_df, reduction_df)
+    reporter.save_json_summary(summary_df, reduction_df)
+    reporter.save_html_report(summary_df, reduction_df, results_df)
+ 
+    out = Path(out_dir)
+    c.print(f"\n[bold green]✓ Experiment complete![/bold green]")
+    c.print(f"  📁 Raw CSV:        [cyan]{out / 'all_results.csv'}[/cyan]")
+    c.print(f"  📄 HTML Report:    [cyan]{out / 'report.html'}[/cyan]")
+    c.print(f"  📊 Charts:         [cyan]{out}/*.png[/cyan]")
+    c.print(f"  📋 JSON Summary:   [cyan]{out / 'summary.json'}[/cyan]")
+ 
+ 
 if __name__ == "__main__":
     main()

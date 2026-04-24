@@ -40,8 +40,8 @@ class BenchmarkSample:
             "dataset":          self.dataset,
             "question":         self.question,
             "context":          self.context,
-            "answer":           self.answer,
-            "is_hallucinated":  self.is_hallucinated,
+            "right_answer":           self.right_answer,
+            "hallucinated_answer":  self.hallucinated_answer,
             "metadata":         self.metadata,
         }
 
@@ -155,34 +155,28 @@ SYNTHETIC_CONTEXTS = [
 
 
 def _make_synthetic(max_samples: int, seed: int = 42) -> List[BenchmarkSample]:
-    """Generate synthetic hallucination benchmark samples."""
+    """
+    Generate synthetic benchmark samples for our reduction experiment.
+    Each sample has both a right and hallucinated reference answer,
+    but those are NOT the model's input - the model generates its own answer.
+    """
     random.seed(seed)
     samples = []
     pool = SYNTHETIC_CONTEXTS * (max_samples // len(SYNTHETIC_CONTEXTS) + 1)
     pool = pool[:max_samples]
-
+ 
     for i, item in enumerate(pool):
-        # Add one factual + one hallucinated per context
         samples.append(BenchmarkSample(
-            sample_id=f"synthetic_{i:04d}_factual",
+            sample_id=f"synthetic_{i:04d}",
             dataset="synthetic",
             question=item["question"],
             context=item["context"],
-            answer=item["factual_answer"],
-            is_hallucinated=False,
+            right_answer=item["factual_answer"],
+            hallucinated_answer=item["hallucinated_answer"],
         ))
-        samples.append(BenchmarkSample(
-            sample_id=f"synthetic_{i:04d}_hallucinated",
-            dataset="synthetic",
-            question=item["question"],
-            context=item["context"],
-            answer=item["hallucinated_answer"],
-            is_hallucinated=True,
-        ))
-
+ 
     random.shuffle(samples)
     return samples[:max_samples]
-
 
 # ─────────────────────────────────────────────
 # Main loader
@@ -249,31 +243,41 @@ class DatasetLoader:
         return samples
 
     def _normalise_row(self, row: dict, cfg: dict, dataset_name: str, idx: int) -> Optional[BenchmarkSample]:
-        """Map raw row columns to BenchmarkSample fields."""
-        ctx_col  = cfg.get("context_col", "context")
-        q_col    = cfg.get("question_col", "question")
-        ans_col  = cfg.get("answer_col", "answer")
-        lbl_col  = cfg.get("label_col", "label")
-
-        context  = self._get_text(row, ctx_col)
-        question = self._get_text(row, q_col)
-        answer   = self._get_text(row, ans_col)
-
-        if not context or not question or not answer:
+        """
+        Map raw dataset row columns to BenchmarkSample fields.
+ 
+        For our reduction experiment, we need:
+          - context (reference passage)
+          - question
+          - right_answer (correct answer, for reference)
+          - hallucinated_answer (known wrong answer, for reference)
+ 
+        The model will generate its own answer - we don't use the dataset's answers
+        as input, only as reference to verify our results.
+        """
+        ctx_col         = cfg.get("context_col", "context")
+        q_col           = cfg.get("question_col", "question")
+        right_col       = cfg.get("right_answer_col", "right_answer")
+        halluc_col      = cfg.get("hallucinated_answer_col", "hallucinated_answer")
+ 
+        context             = self._get_text(row, ctx_col)
+        question            = self._get_text(row, q_col)
+        right_answer        = self._get_text(row, right_col)
+        hallucinated_answer = self._get_text(row, halluc_col)
+ 
+        # Must have context and question at minimum
+        if not context or not question:
             return None
-
-        # Determine ground-truth hallucination label
-        is_hallucinated = self._parse_label(row, lbl_col, cfg)
-
+ 
         return BenchmarkSample(
             sample_id=f"{dataset_name}_{idx:05d}",
             dataset=dataset_name,
             question=question,
             context=context,
-            answer=answer,
-            is_hallucinated=is_hallucinated,
+            right_answer=right_answer,
+            hallucinated_answer=hallucinated_answer,
             metadata={k: v for k, v in row.items()
-                      if k not in (ctx_col, q_col, ans_col, lbl_col)},
+                      if k not in (ctx_col, q_col, right_col, halluc_col)},
         )
 
     def _get_text(self, row: dict, col: str) -> str:
@@ -282,22 +286,8 @@ class DatasetLoader:
             val = " ".join(str(v) for v in val)
         return str(val).strip()
 
-    def _parse_label(self, row: dict, lbl_col: str, cfg: dict) -> bool:
-        raw = row.get(lbl_col)
-        if raw is None:
-            return False
-        if isinstance(raw, bool):
-            return raw
-        if isinstance(raw, (int, float)):
-            threshold = cfg.get("label_threshold", 0.5)
-            # adherence_score: high = factual → hallucinated = low score
-            if "adherence" in lbl_col.lower():
-                return float(raw) < threshold
-            return float(raw) >= threshold
-        s = str(raw).lower().strip()
-        return s in {"yes", "true", "1", "hallucinated", "hallucination"}
-
-    # ── JSON ────────────────────────────────────────────────
+    
+# ── JSON ────────────────────────────────────────────────
 
     def _load_json(self, cfg: dict) -> List[BenchmarkSample]:
         path = Path(cfg["path"])

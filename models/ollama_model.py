@@ -91,6 +91,10 @@ class OllamaModel(BaseModel):
             "num_predict": max_tokens,
             "stop":        ["\n\nHuman:", "\n\nUser:", "###"],
         }
+        if "top_p" in kwargs:
+            options["top_p"] = kwargs["top_p"]
+        if "top_k" in kwargs:
+            options["top_k"] = kwargs["top_k"]
 
         for attempt in range(3):
             try:

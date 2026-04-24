@@ -1,10 +1,16 @@
 """
-Reporter
-========
-Generates:
-  - Rich console summary table
-  - Matplotlib / Seaborn charts (bar plots, heatmaps, ROC curves)
-  - Standalone HTML report
+Reporter — Reduction Experiment
+================================
+Generates reports and charts for the reduction experiment.
+
+Outputs:
+  - Console tables (rich): per-model reducer comparison
+  - Charts (matplotlib):
+      * reducer_comparison.png     - bar chart of mean scores per reducer
+      * score_reductions.png       - bar chart of reductions vs baseline
+      * per_detector_comparison.png - subplots for each detector
+      * before_after_per_reducer.png - grouped bars: baseline vs each reducer
+  - HTML report: self-contained file with all tables and charts
   - JSON summary
 """
 from __future__ import annotations
@@ -22,33 +28,51 @@ from rich import box
 
 console = Console()
 
-METHOD_ORDER = [
-    "token_similarity",
-    "semantic_similarity",
-    "llm_based",
-    "bert_stochastic",
-    "ensemble",
-]
+# Score column display names
+DETECTOR_LABELS = {
+    "token_score":     "Token Similarity",
+    "semantic_score":  "Semantic Similarity",
+    "bert_score":      "BERT Stochastic",
+    "llm_score":       "LLM Judge",
+}
 
-METHOD_LABELS = {
-    "token_similarity":    "Token Similarity",
-    "semantic_similarity": "Semantic Similarity",
-    "llm_based":           "LLM Prompt-Based",
-    "bert_stochastic":     "BERT Stochastic",
-    "ensemble":            "Ensemble",
+# Reducer display names
+REDUCER_LABELS = {
+    "baseline":              "Baseline (no reducer)",
+    "rag":                   "RAG",
+    "constrained_decoding":  "Constrained Decoding",
+    "self_verification":     "Self-Verification",
+}
+
+# Colors for plots (red = baseline/bad, green = good reductions)
+REDUCER_COLORS = {
+    "baseline":              "#E74C3C",  # red
+    "rag":                   "#2ECC71",  # green
+    "constrained_decoding":  "#3498DB",  # blue
+    "self_verification":     "#F39C12",  # orange
 }
 
 
 class Reporter:
+    """Generates console tables, charts, and HTML reports for the reduction experiment."""
+
     def __init__(self, output_dir: str = "results"):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── console ───────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════
+    # Console output
+    # ══════════════════════════════════════════════════════════
 
     def print_summary(self, summary_df: pd.DataFrame):
-        """Print a rich table to the console."""
-        console.rule("[bold cyan]Hallucination Benchmark Results[/bold cyan]")
+        """Print per-model reducer comparison table to the console."""
+        if summary_df is None or len(summary_df) == 0:
+            console.print("[yellow]No summary data to report.[/yellow]")
+            return
+
+        console.rule("[bold cyan]Reduction Experiment Results[/bold cyan]")
+
+        score_cols = [c for c in DETECTOR_LABELS if c in summary_df.columns]
 
         for model_name, mdf in summary_df.groupby("model"):
             table = Table(
@@ -56,286 +80,352 @@ class Reporter:
                 box=box.ROUNDED,
                 show_header=True,
                 header_style="bold magenta",
+                caption="[dim]Lower scores = less hallucination. Baseline first.[/dim]",
             )
-            table.add_column("Method",    style="cyan",    width=24)
-            table.add_column("Dataset",   style="white",   width=18)
-            table.add_column("Accuracy",  justify="right", style="yellow")
-            table.add_column("Precision", justify="right", style="green")
-            table.add_column("Recall",    justify="right", style="blue")
-            table.add_column("F1",        justify="right", style="bold white")
-            table.add_column("AUC-ROC",   justify="right", style="magenta")
-            table.add_column("Samples",   justify="right", style="dim")
-
-            for _, row in mdf.sort_values(["method", "dataset"]).iterrows():
-                method_label = METHOD_LABELS.get(row["method"], row["method"])
-                table.add_row(
-                    method_label,
-                    str(row.get("dataset", "-")),
-                    f'{row.get("accuracy",  "-"):.4f}' if pd.notna(row.get("accuracy"))  else "-",
-                    f'{row.get("precision", "-"):.4f}' if pd.notna(row.get("precision")) else "-",
-                    f'{row.get("recall",    "-"):.4f}' if pd.notna(row.get("recall"))    else "-",
-                    f'{row.get("f1",        "-"):.4f}' if pd.notna(row.get("f1"))        else "-",
-                    f'{row.get("auc_roc",   "-"):.4f}' if pd.notna(row.get("auc_roc"))   else "-",
-                    str(int(row.get("n_samples", 0))),
+            table.add_column("Reducer", style="cyan", width=24)
+            table.add_column("Dataset", style="white", width=18)
+            for col in score_cols:
+                table.add_column(
+                    DETECTOR_LABELS[col],
+                    justify="right",
+                    style="yellow",
                 )
+            table.add_column("N", justify="right", style="dim")
+
+            # Order so baseline comes first
+            reducer_order = ["baseline"] + [
+                r for r in mdf["reducer"].unique() if r != "baseline"
+            ]
+            mdf_sorted = mdf.copy()
+            mdf_sorted["_order"] = mdf_sorted["reducer"].map(
+                {r: i for i, r in enumerate(reducer_order)}
+            )
+            mdf_sorted = mdf_sorted.sort_values(["_order", "dataset"])
+
+            for _, row in mdf_sorted.iterrows():
+                reducer_label = REDUCER_LABELS.get(row["reducer"], row["reducer"])
+                cells = [reducer_label, str(row.get("dataset", "-"))]
+                for col in score_cols:
+                    val = row.get(col)
+                    cells.append(f"{val:.3f}" if pd.notna(val) else "-")
+                cells.append(str(int(row.get("n_samples", 0))))
+                table.add_row(*cells)
 
             console.print(table)
-            console.print()
 
-    def print_comparison_table(self, comparison_df: pd.DataFrame):
-        """Print the method comparison table (averaged across all models/datasets)."""
-        console.rule("[bold yellow]Method Comparison (Averaged)[/bold yellow]")
-        table = Table(box=box.DOUBLE_EDGE, header_style="bold cyan")
-        table.add_column("Method",    style="cyan",  width=26)
-        table.add_column("Accuracy",  justify="right", style="yellow")
-        table.add_column("Precision", justify="right", style="green")
-        table.add_column("Recall",    justify="right", style="blue")
-        table.add_column("F1",        justify="right", style="bold white")
-        table.add_column("AUC-ROC",   justify="right", style="magenta")
-
-        for _, row in comparison_df.iterrows():
-            label = METHOD_LABELS.get(row["method"], row["method"])
-            table.add_row(
-                label,
-                f'{row.get("accuracy",  0):.4f}',
-                f'{row.get("precision", 0):.4f}',
-                f'{row.get("recall",    0):.4f}',
-                f'{row.get("f1",        0):.4f}',
-                f'{row.get("auc_roc",   0):.4f}',
-            )
-        console.print(table)
-
-    # ── charts ────────────────────────────────────────────────
-
-    def save_charts(self, summary_df: pd.DataFrame, results_df: pd.DataFrame):
-        """Save all charts to the output directory."""
-        try:
-            import matplotlib
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
-            import seaborn as sns
-            sns.set_theme(style="darkgrid", palette="muted")
-        except ImportError:
-            logger.warning("matplotlib/seaborn not installed — skipping charts")
+    def print_reduction_table(self, reduction_df: pd.DataFrame):
+        """Print the reduction-vs-baseline table."""
+        if reduction_df is None or len(reduction_df) == 0:
             return
 
-        self._chart_method_comparison(summary_df, plt, sns)
-        self._chart_model_heatmap(summary_df, plt, sns)
-        self._chart_score_distributions(results_df, plt, sns)
-        self._chart_precision_recall(summary_df, plt, sns)
+        console.rule("[bold yellow]Score Reduction vs Baseline[/bold yellow]")
+        console.print("[dim]Positive = reducer lowered hallucination score. Higher = better.[/dim]\n")
 
-        logger.info(f"Charts saved to {self.output_dir}/")
+        reduction_cols = [c for c in reduction_df.columns if c.endswith("_reduction")]
 
-    def _chart_method_comparison(self, df: pd.DataFrame, plt, sns):
-        """Grouped bar chart: Accuracy / Precision / Recall / F1 per method."""
-        avg = (
-            df.groupby("method")[["accuracy", "precision", "recall", "f1"]]
-            .mean()
-            .reset_index()
-        )
-        avg["method_label"] = avg["method"].map(METHOD_LABELS)
-        avg_melt = avg.melt(
-            id_vars="method_label",
-            value_vars=["accuracy", "precision", "recall", "f1"],
-            var_name="metric",
-            value_name="score",
-        )
+        for model_name, mdf in reduction_df.groupby("model"):
+            table = Table(
+                title=f"Model: [bold green]{model_name}[/bold green]",
+                box=box.ROUNDED,
+                header_style="bold magenta",
+            )
+            table.add_column("Reducer", style="cyan")
+            for col in reduction_cols:
+                label = DETECTOR_LABELS.get(
+                    col.replace("_reduction", "_score"),
+                    col.replace("_reduction", ""),
+                )
+                table.add_column(label, justify="right")
+
+            for _, row in mdf.iterrows():
+                reducer_label = REDUCER_LABELS.get(row["reducer"], row["reducer"])
+                cells = [reducer_label]
+                for col in reduction_cols:
+                    val = row.get(col)
+                    if pd.notna(val):
+                        # Color: green if positive (good), red if negative (bad)
+                        color = "green" if val > 0 else "red"
+                        cells.append(f"[{color}]{val:+.3f}[/{color}]")
+                    else:
+                        cells.append("-")
+                table.add_row(*cells)
+
+            console.print(table)
+
+    # ══════════════════════════════════════════════════════════
+    # Charts
+    # ══════════════════════════════════════════════════════════
+
+    def save_charts(self, summary_df: pd.DataFrame, reduction_df: pd.DataFrame = None):
+        """Save all charts as PNG files in the output directory."""
+        import matplotlib.pyplot as plt
+        import matplotlib
+        matplotlib.use("Agg")  # Non-interactive backend
+
+        score_cols = [c for c in DETECTOR_LABELS if c in summary_df.columns]
+        if not score_cols:
+            logger.warning("No detector scores to plot.")
+            return
+
+        self._plot_before_after(summary_df, score_cols)
+        self._plot_per_detector_subplots(summary_df, score_cols)
+
+        if reduction_df is not None and len(reduction_df) > 0:
+            self._plot_reductions(reduction_df)
+
+        logger.info(f"✓ Charts saved to {self.output_dir}")
+
+    def _plot_before_after(self, summary_df: pd.DataFrame, score_cols: list):
+        """
+        Grouped bar chart: one group per detector, bars for each reducer.
+        Shows baseline vs each reducer side by side.
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        # Average across models and datasets for the overall picture
+        avg = summary_df.groupby("reducer")[score_cols].mean().round(4)
+
+        # Order: baseline first, then others
+        reducer_order = ["baseline"] + [
+            r for r in avg.index if r != "baseline"
+        ]
+        avg = avg.loc[[r for r in reducer_order if r in avg.index]]
 
         fig, ax = plt.subplots(figsize=(12, 6))
-        sns.barplot(
-            data=avg_melt, x="method_label", y="score", hue="metric", ax=ax
-        )
-        ax.set_title("Hallucination Detection: Method Comparison", fontsize=14, fontweight="bold")
-        ax.set_xlabel("Detection Method")
-        ax.set_ylabel("Score")
-        ax.set_ylim(0, 1.05)
-        ax.legend(title="Metric", loc="upper right")
-        plt.xticks(rotation=20, ha="right")
-        plt.tight_layout()
-        plt.savefig(self.output_dir / "method_comparison.png", dpi=150)
-        plt.close()
+        x = np.arange(len(score_cols))
+        width = 0.8 / len(avg)
 
-    def _chart_model_heatmap(self, df: pd.DataFrame, plt, sns):
-        """Heatmap: F1 score for each (model, method)."""
-        pivot = df.pivot_table(index="model", columns="method", values="f1", aggfunc="mean")
-        # Re-order columns
-        ordered = [m for m in METHOD_ORDER if m in pivot.columns]
-        pivot   = pivot[ordered]
-        pivot.columns = [METHOD_LABELS.get(c, c) for c in pivot.columns]
-
-        fig, ax = plt.subplots(figsize=(max(10, len(pivot.columns) * 2), max(4, len(pivot) * 1.5)))
-        sns.heatmap(
-            pivot, annot=True, fmt=".3f", cmap="RdYlGn",
-            vmin=0, vmax=1, linewidths=0.5, ax=ax,
-        )
-        ax.set_title("F1 Score Heatmap: Model × Detection Method", fontsize=13, fontweight="bold")
-        ax.set_xlabel("Detection Method")
-        ax.set_ylabel("Model")
-        plt.tight_layout()
-        plt.savefig(self.output_dir / "model_method_heatmap.png", dpi=150)
-        plt.close()
-
-    def _chart_score_distributions(self, df: pd.DataFrame, plt, sns):
-        """Violin / KDE plots of hallucination scores split by ground truth."""
-        score_cols = {
-            "token_score":    "Token Similarity",
-            "semantic_score": "Semantic Similarity",
-            "llm_score":      "LLM-Based",
-            "bert_score":     "BERT Stochastic",
-            "ensemble_score": "Ensemble",
-        }
-        available = [c for c in score_cols if c in df.columns]
-        if not available:
-            return
-
-        n = len(available)
-        fig, axes = plt.subplots(1, n, figsize=(n * 4, 5), sharey=True)
-        if n == 1:
-            axes = [axes]
-
-        for ax, col in zip(axes, available):
-            sub = df[[col, "gt_hallucinated"]].dropna()
-            sub["label"] = sub["gt_hallucinated"].map({True: "Hallucinated", False: "Factual"})
-            sns.violinplot(data=sub, x="label", y=col, ax=ax,
-                           palette={"Factual": "#2ecc71", "Hallucinated": "#e74c3c"})
-            ax.set_title(score_cols[col], fontsize=11)
-            ax.set_xlabel("")
-            ax.set_ylabel("Hallucination Score" if ax == axes[0] else "")
-            ax.set_ylim(-0.05, 1.05)
-
-        fig.suptitle("Score Distributions: Factual vs Hallucinated", fontsize=13, fontweight="bold")
-        plt.tight_layout()
-        plt.savefig(self.output_dir / "score_distributions.png", dpi=150)
-        plt.close()
-
-    def _chart_precision_recall(self, df: pd.DataFrame, plt, sns):
-        """Precision-Recall scatter for all (model, method) pairs."""
-        sub = df[["model", "method", "precision", "recall", "f1"]].dropna()
-        if sub.empty:
-            return
-
-        fig, ax = plt.subplots(figsize=(9, 7))
-        models  = sub["model"].unique()
-        markers = ["o", "s", "^", "D", "P", "X", "*"]
-
-        for i, method in enumerate(METHOD_ORDER):
-            mdata = sub[sub["method"] == method]
-            if mdata.empty:
-                continue
-            label = METHOD_LABELS.get(method, method)
-            for j, model in enumerate(models):
-                pt = mdata[mdata["model"] == model]
-                if pt.empty:
-                    continue
-                ax.scatter(
-                    pt["recall"].values, pt["precision"].values,
-                    label=f"{label} / {model}",
-                    marker=markers[j % len(markers)],
-                    s=120, zorder=3,
+        for i, (reducer, row) in enumerate(avg.iterrows()):
+            offset = (i - len(avg) / 2 + 0.5) * width
+            bars = ax.bar(
+                x + offset,
+                row.values,
+                width,
+                label=REDUCER_LABELS.get(reducer, reducer),
+                color=REDUCER_COLORS.get(reducer, "#999999"),
+                edgecolor="white",
+                linewidth=1.2,
+            )
+            for bar, val in zip(bars, row.values):
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + 0.01,
+                    f"{val:.2f}",
+                    ha="center", va="bottom",
+                    fontsize=9,
                 )
-                for _, row in pt.iterrows():
-                    ax.annotate(
-                        f"{row['f1']:.2f}",
-                        (row["recall"], row["precision"]),
-                        textcoords="offset points", xytext=(5, 5),
-                        fontsize=7, color="gray",
-                    )
 
-        ax.set_xlim(-0.05, 1.05)
-        ax.set_ylim(-0.05, 1.05)
-        ax.set_xlabel("Recall",    fontsize=12)
-        ax.set_ylabel("Precision", fontsize=12)
-        ax.set_title("Precision vs Recall (F1 annotations)", fontsize=13, fontweight="bold")
-        ax.legend(fontsize=7, loc="lower left", ncol=2)
-        ax.grid(True, alpha=0.4)
+        ax.set_xticks(x)
+        ax.set_xticklabels([DETECTOR_LABELS[c] for c in score_cols], fontsize=11)
+        ax.set_ylabel("Hallucination Score (lower is better)", fontsize=12)
+        ax.set_title(
+            "Hallucination Scores by Reducer (Lower = Less Hallucination)",
+            fontsize=14, fontweight="bold", pad=15,
+        )
+        ax.set_ylim(0, 1.1)
+        ax.legend(loc="upper right", framealpha=0.9)
+        ax.grid(axis="y", alpha=0.3, linestyle="--")
+
         plt.tight_layout()
-        plt.savefig(self.output_dir / "precision_recall.png", dpi=150)
+        path = self.output_dir / "before_after_per_reducer.png"
+        plt.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
         plt.close()
+        logger.info(f"  Saved: {path}")
 
-    # ── HTML report ───────────────────────────────────────────
+    def _plot_per_detector_subplots(self, summary_df: pd.DataFrame, score_cols: list):
+        """
+        One subplot per detector. Within each subplot:
+        bar chart of scores per reducer (averaged across models).
+        """
+        import matplotlib.pyplot as plt
 
-    def save_html_report(self, summary_df: pd.DataFrame, results_df: pd.DataFrame):
-        """Generate a self-contained HTML report."""
-        import base64, io
-        charts = {}
-        for fname in ["method_comparison.png", "model_method_heatmap.png",
-                      "score_distributions.png", "precision_recall.png"]:
-            path = self.output_dir / fname
-            if path.exists():
-                with open(path, "rb") as f:
-                    charts[fname] = base64.b64encode(f.read()).decode()
+        n = len(score_cols)
+        cols = min(n, 2)
+        rows = (n + cols - 1) // cols
 
-        def img_tag(name):
-            if name in charts:
-                return f'<img src="data:image/png;base64,{charts[name]}" style="max-width:100%;margin:12px 0;">'
-            return ""
+        fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 5 * rows))
+        if rows * cols == 1:
+            axes = [axes]
+        else:
+            axes = axes.flatten()
 
-        table_html = summary_df.to_html(index=False, classes="df-table", border=0, float_format=lambda x: f"{x:.4f}")
-        results_sample = results_df.head(50).to_html(index=False, classes="df-table", border=0)
+        avg = summary_df.groupby("reducer")[score_cols].mean().round(4)
+        reducer_order = ["baseline"] + [r for r in avg.index if r != "baseline"]
+        avg = avg.loc[[r for r in reducer_order if r in avg.index]]
 
-        html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>Hallucination Benchmark Report</title>
-<style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-          background: #0f1117; color: #e0e0e0; max-width: 1400px; margin: 0 auto; padding: 24px; }}
-  h1   {{ color: #64b5f6; border-bottom: 2px solid #1e88e5; padding-bottom: 8px; }}
-  h2   {{ color: #81c784; margin-top: 36px; }}
-  h3   {{ color: #ffb74d; }}
-  .df-table {{ border-collapse: collapse; width: 100%; font-size: 13px; }}
-  .df-table th {{ background: #1e3a5f; color: #90caf9; padding: 8px 12px; text-align: left; }}
-  .df-table td {{ padding: 6px 12px; border-bottom: 1px solid #2a2a3e; }}
-  .df-table tr:hover {{ background: #1a2030; }}
-  .card {{ background: #1a1d2e; border: 1px solid #2a3050; border-radius: 10px; padding: 20px; margin: 16px 0; }}
-  .badge {{ display:inline-block; padding:3px 10px; border-radius:12px; font-size:12px; margin:2px; }}
-  .green  {{ background:#1b5e20; color:#a5d6a7; }}
-  .blue   {{ background:#0d47a1; color:#90caf9; }}
-  .orange {{ background:#e65100; color:#ffcc80; }}
-  .caption {{ color:#aaa; font-size:12px; margin-top:6px; }}
-  img {{ border-radius:8px; }}
-</style>
-</head>
-<body>
-<h1>🔬 Hallucination Detection Benchmark Report</h1>
-<div class="card">
-  <h3>Overview</h3>
-  <p>Implements the 4 detection methods from the AWS ML blog:</p>
-  <span class="badge orange">Token Similarity</span>
-  <span class="badge blue">Semantic Similarity</span>
-  <span class="badge green">LLM Prompt-Based</span>
-  <span class="badge orange">BERT Stochastic</span>
-  <span class="badge blue">Ensemble</span>
-</div>
+        for i, col in enumerate(score_cols):
+            ax = axes[i]
+            reducers = avg.index.tolist()
+            values   = avg[col].values
+            colors   = [REDUCER_COLORS.get(r, "#999999") for r in reducers]
+            labels   = [REDUCER_LABELS.get(r, r) for r in reducers]
 
-<h2>📊 Method Comparison Charts</h2>
-<div class="card">{img_tag("method_comparison.png")}<p class="caption">Bar chart: Accuracy / Precision / Recall / F1 per detection method</p></div>
-<div class="card">{img_tag("model_method_heatmap.png")}<p class="caption">Heatmap: F1 score for each (model × method) pair</p></div>
-<div class="card">{img_tag("score_distributions.png")}<p class="caption">Score distributions split by ground-truth label</p></div>
-<div class="card">{img_tag("precision_recall.png")}<p class="caption">Precision-Recall scatter (F1 annotations)</p></div>
+            bars = ax.bar(labels, values, color=colors,
+                          edgecolor="white", linewidth=1.2, width=0.6)
+            for bar, val in zip(bars, values):
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + 0.01,
+                    f"{val:.3f}",
+                    ha="center", va="bottom",
+                    fontsize=10, fontweight="bold",
+                )
 
-<h2>📋 Full Metrics Table</h2>
-<div class="card">{table_html}</div>
+            ax.set_title(DETECTOR_LABELS[col], fontsize=12, fontweight="bold")
+            ax.set_ylabel("Mean Score")
+            ax.set_ylim(0, 1.1)
+            ax.grid(axis="y", alpha=0.3, linestyle="--")
+            ax.tick_params(axis="x", rotation=20)
 
-<h2>🗂 Sample Results (first 50 rows)</h2>
-<div class="card">{results_sample}</div>
+        # Hide unused subplots
+        for j in range(len(score_cols), len(axes)):
+            axes[j].axis("off")
 
-<p style="color:#555; font-size:12px; margin-top:40px;">
-  Generated by hallucination_benchmark — based on methods from the AWS ML blog<br>
-  "Detect hallucinations for RAG-based systems" (2025)
-</p>
-</body>
-</html>"""
+        fig.suptitle(
+            "Per-Detector Scores Across Reducers",
+            fontsize=15, fontweight="bold", y=1.02,
+        )
+        plt.tight_layout()
+        path = self.output_dir / "per_detector_comparison.png"
+        plt.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
+        plt.close()
+        logger.info(f"  Saved: {path}")
+
+    def _plot_reductions(self, reduction_df: pd.DataFrame):
+        """
+        Bar chart showing how much each reducer lowered scores vs baseline.
+        Positive = good (reduced hallucination). Negative = bad (made it worse).
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        reduction_cols = [c for c in reduction_df.columns if c.endswith("_reduction")]
+        if not reduction_cols:
+            return
+
+        # Average across models
+        avg = reduction_df.groupby("reducer")[reduction_cols].mean().round(4)
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+        x = np.arange(len(reduction_cols))
+        width = 0.8 / len(avg)
+
+        for i, (reducer, row) in enumerate(avg.iterrows()):
+            offset = (i - len(avg) / 2 + 0.5) * width
+            bars = ax.bar(
+                x + offset,
+                row.values,
+                width,
+                label=REDUCER_LABELS.get(reducer, reducer),
+                color=REDUCER_COLORS.get(reducer, "#999999"),
+                edgecolor="white",
+                linewidth=1.2,
+            )
+            for bar, val in zip(bars, row.values):
+                y_pos = bar.get_height()
+                va = "bottom" if y_pos >= 0 else "top"
+                offset_y = 0.005 if y_pos >= 0 else -0.005
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    y_pos + offset_y,
+                    f"{val:+.2f}",
+                    ha="center", va=va, fontsize=9,
+                )
+
+        ax.axhline(0, color="black", linewidth=0.8)
+        detector_labels = [
+            DETECTOR_LABELS.get(c.replace("_reduction", "_score"), c)
+            for c in reduction_cols
+        ]
+        ax.set_xticks(x)
+        ax.set_xticklabels(detector_labels, fontsize=11)
+        ax.set_ylabel("Score Reduction vs Baseline\n(higher = better)", fontsize=12)
+        ax.set_title(
+            "Hallucination Score Reduction by Reducer",
+            fontsize=14, fontweight="bold", pad=15,
+        )
+        ax.legend(loc="upper right", framealpha=0.9)
+        ax.grid(axis="y", alpha=0.3, linestyle="--")
+
+        plt.tight_layout()
+        path = self.output_dir / "score_reductions.png"
+        plt.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
+        plt.close()
+        logger.info(f"  Saved: {path}")
+
+    # ══════════════════════════════════════════════════════════
+    # Output files
+    # ══════════════════════════════════════════════════════════
+
+    def save_json_summary(self, summary_df: pd.DataFrame,
+                          reduction_df: Optional[pd.DataFrame] = None):
+        """Save JSON summary of the experiment."""
+        out = {
+            "summary": summary_df.to_dict(orient="records") if summary_df is not None else [],
+        }
+        if reduction_df is not None and len(reduction_df) > 0:
+            out["reductions"] = reduction_df.to_dict(orient="records")
+
+        path = self.output_dir / "summary.json"
+        with open(path, "w") as f:
+            json.dump(out, f, indent=2, default=str)
+        logger.info(f"  Saved: {path}")
+
+    def save_html_report(self, summary_df: pd.DataFrame,
+                         reduction_df: Optional[pd.DataFrame] = None,
+                         results_df: Optional[pd.DataFrame] = None):
+        """Save a simple self-contained HTML report."""
+        html_parts = [
+            "<!DOCTYPE html><html><head>",
+            "<meta charset='utf-8'>",
+            "<title>Hallucination Reduction Experiment Report</title>",
+            "<style>",
+            "body { font-family: -apple-system, Arial, sans-serif; max-width: 1200px; "
+            "margin: 2em auto; padding: 0 1em; color: #333; }",
+            "h1 { border-bottom: 3px solid #3498DB; padding-bottom: 10px; }",
+            "h2 { color: #2C3E50; margin-top: 2em; }",
+            "table { border-collapse: collapse; margin: 1em 0; width: 100%; }",
+            "th { background: #3498DB; color: white; padding: 8px 12px; text-align: left; }",
+            "td { padding: 6px 12px; border-bottom: 1px solid #ddd; }",
+            "tr:nth-child(even) { background: #f9f9f9; }",
+            "img { max-width: 100%; margin: 1em 0; border: 1px solid #ddd; "
+            "border-radius: 4px; }",
+            ".caption { color: #666; font-size: 0.9em; margin: 0.5em 0; }",
+            "</style></head><body>",
+            "<h1>Hallucination Reduction Experiment</h1>",
+            "<p class='caption'>Testing how different reduction methods "
+            "affect LLM hallucination scores, measured by multiple detectors.</p>",
+        ]
+
+        # Charts
+        for chart_name, chart_title in [
+            ("before_after_per_reducer.png", "Scores by Reducer (All Detectors)"),
+            ("per_detector_comparison.png", "Per-Detector Comparison"),
+            ("score_reductions.png", "Score Reductions vs Baseline"),
+        ]:
+            chart_path = self.output_dir / chart_name
+            if chart_path.exists():
+                html_parts.append(f"<h2>{chart_title}</h2>")
+                html_parts.append(f"<img src='{chart_name}' alt='{chart_title}'>")
+
+        # Summary table
+        if summary_df is not None and len(summary_df) > 0:
+            html_parts.append("<h2>Mean Scores per (Model × Reducer × Dataset)</h2>")
+            html_parts.append(summary_df.to_html(index=False, float_format="%.3f"))
+
+        # Reduction table
+        if reduction_df is not None and len(reduction_df) > 0:
+            html_parts.append("<h2>Score Reductions vs Baseline</h2>")
+            html_parts.append(
+                "<p class='caption'>Positive values mean the reducer lowered "
+                "the hallucination score (good).</p>"
+            )
+            html_parts.append(reduction_df.to_html(index=False, float_format="%.3f"))
+
+        html_parts.append("</body></html>")
 
         path = self.output_dir / "report.html"
         with open(path, "w") as f:
-            f.write(html)
-        logger.info(f"HTML report saved to {path}")
-
-    # ── JSON summary ─────────────────────────────────────────
-
-    def save_json_summary(self, summary_df: pd.DataFrame):
-        path = self.output_dir / "summary.json"
-        summary_df.to_json(path, orient="records", indent=2)
-        logger.info(f"JSON summary saved to {path}")
+            f.write("\n".join(html_parts))
+        logger.info(f"  Saved: {path}")
