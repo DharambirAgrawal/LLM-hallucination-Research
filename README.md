@@ -1,9 +1,28 @@
-# 🔬 Hallucination Detection Benchmark — Ollama Edition
+# 🔬 LLM Hallucination Detection & Reduction Benchmark — Ollama Edition
 
-Test **any LLM** for hallucination using 4 detection methods from the  
+Test **any LLM** for hallucination using 4 detection methods, then measure how
+**reduction methods** (RAG, Constrained Decoding, Self-Verification) lower
+hallucination scores.
+
+Based on detection techniques from the
 [AWS ML blog: "Detect hallucinations for RAG-based systems" (2025)](https://aws.amazon.com/blogs/machine-learning/detect-hallucinations-for-rag-based-systems/).
 
 **100% local. No API keys. No GPU setup. Just Ollama.**
+
+---
+
+## 🧪 Experiment Workflow
+
+```
+For each question in the dataset:
+
+  1. Model generates a BASELINE answer (no help)
+  2. All 4 detectors score the answer against the correct answer → baseline scores
+  3. For each REDUCER (RAG, Constrained Decoding, Self-Verification):
+       a. Model generates a new answer using that strategy
+       b. All 4 detectors score the new answer → reduced scores
+  4. Compare: which reducer lowered hallucination scores the most?
+```
 
 ---
 
@@ -15,11 +34,10 @@ curl -fsSL https://ollama.com/install.sh | sh   # Linux/Mac
 # Windows: download from https://ollama.com/download
 
 # 2. Pull models you want to test
-ollama pull llama3.2:3b
-ollama pull mistral:7b
-ollama pull gemma3:4b
+ollama pull deepseek-r1:7b
+ollama pull qwen2.5:7b
 
-# 3. Run benchmark
+# 3. Run the experiment
 pip install -r requirements.txt
 python main.py
 ```
@@ -61,10 +79,10 @@ python main.py --list-models
 python main.py --list-available
 
 # Pull models then run benchmark
-python main.py --pull llama3.2:3b mistral:7b gemma3:4b
+python main.py --pull deepseek-r1:7b qwen2.5:7b
 
 # Run specific models only
-python main.py --models llama3.2-3b mistral-7b
+python main.py --models deepseek-r1-7b qwen2.5-7b
 
 # Fast test (20 samples, synthetic only)
 python main.py --quick
@@ -77,64 +95,70 @@ python main.py --host http://192.168.1.10:11434
 
 # Check setup without running inference
 python main.py --dry-run
-
-# Smoke-test (no Ollama needed)
-python quick_demo.py
-
-# Smoke-test with Ollama
-python quick_demo.py --with-ollama llama3.2:3b
 ```
 
 ---
 
 ## 📐 Detection Methods
 
-| # | Method | Accuracy | Precision | Recall | LLM Calls |
-|---|--------|----------|-----------|--------|-----------|
-| 1 | **Token Similarity** | 0.47 | **0.96** | 0.03 | 0 — free |
-| 2 | **Semantic Similarity** | 0.48 | 0.90 | 0.02 | 0 (embeddings only) |
-| 3 | **LLM Prompt-Based** | 0.75 | 0.94 | 0.53 | 1 per sample |
-| 4 | **BERT Stochastic** | **0.76** | 0.72 | **0.90** | N+1 per sample |
-| + | **Ensemble** | best combined | — | — | N+2 |
+Four methods score each generated answer against the correct answer from the dataset.
+All scores range from 0 (factual) to 1 (hallucinated).
 
-*Metrics from AWS blog, averaged across Wikipedia + synthetic datasets.*
+| # | Method | How It Works | Cost |
+|---|--------|-------------|------|
+| 1 | **Token Similarity** | Measures word overlap (BLEU, ROUGE-L, intersection) between generated and correct answer | Free — no LLM calls |
+| 2 | **Semantic Similarity** | Computes cosine similarity of sentence embeddings between generated and correct answer | Free — embeddings only |
+| 3 | **LLM Judge** | Asks a separate LLM: "Does this answer match the correct answer?" Returns 0-1 score | 1 LLM call per answer |
+| 4 | **BERT Stochastic** | Generates multiple answers and checks consistency — inconsistent answers = likely hallucinated | N+1 LLM calls per answer |
 
-**Recommendation:**
-- Use **Token Similarity** as a cheap pre-filter (catches obvious hallucinations)
-- Use **LLM-Based** for the best accuracy/cost ratio
-- Use **BERT Stochastic** when recall is critical (medical, legal)
-- Use **Ensemble** for production systems
+---
+
+## 🔧 Reduction Methods
+
+Three methods that modify how the model generates answers to reduce hallucinations.
+
+| Method | Strategy | Trade-off |
+|--------|----------|-----------|
+| **RAG** | Provides a reference passage alongside the question so the model can ground its answer in facts | Requires a knowledge source (provided by the dataset in our experiment) |
+| **Constrained Decoding** | Lowers temperature (0.1), top_k (5), and top_p (0.3) to force the model to pick only high-confidence tokens | May produce overly conservative or repetitive answers |
+| **Self-Verification** | Two-pass: generates answer, then asks the model to verify it. If flagged as incorrect, returns the correction | ~2x slower (two generations per question) |
 
 ---
 
 ## 📁 Project Structure
 
 ```
-hallucination_benchmark/
-├── main.py                  # Main entry point
+LLM-hallucination-Research/
+├── main.py                  # Main entry point — runs the full experiment
 ├── quick_demo.py            # Smoke-test (no Ollama required)
-├── config.yaml              # All settings — models, datasets, detectors
+├── config.yaml              # All settings — models, datasets, detectors, reducers
 ├── requirements.txt
 │
 ├── models/
 │   ├── base_model.py        # Abstract interface
-│   ├── ollama_model.py      # Ollama backend (works for ALL models)
+│   ├── ollama_model.py      # Ollama backend (supports top_p, top_k for constrained decoding)
 │   └── model_factory.py     # Builds model list, checks what's installed
 │
 ├── data/
-│   └── datasets.py          # HaluEval, RAGBench, synthetic loader
+│   └── datasets.py          # HaluEval QA loader + synthetic data generator
 │
 ├── detectors/
-│   ├── llm_detector.py      # Method 1: LLM judge prompt
-│   ├── semantic_detector.py # Method 2: Cosine similarity
-│   ├── bert_detector.py     # Method 3: BERT stochastic checker
-│   ├── token_detector.py    # Method 4: BLEU + ROUGE-L + intersection
-│   └── ensemble.py          # Weighted combination
+│   ├── llm_detector.py      # LLM judge — compares generated answer to correct answer
+│   ├── semantic_detector.py # Cosine similarity of sentence embeddings
+│   ├── bert_detector.py     # BERT stochastic consistency checker
+│   ├── token_detector.py    # BLEU + ROUGE-L + token intersection
+│   └── ensemble.py          # Weighted combination (optional)
+│
+├── reducers/                # NEW — hallucination reduction methods
+│   ├── base_reducer.py      # Abstract interface for all reducers
+│   ├── rag.py               # Retrieval-Augmented Generation
+│   ├── constrained_decoding.py  # Tight generation parameters
+│   └── self_verification.py # Two-pass: generate then verify
 │
 └── benchmark/
-    ├── runner.py             # Orchestrates all model × dataset runs
-    ├── evaluator.py          # Accuracy, Precision, Recall, F1, AUC-ROC
-    └── reporter.py           # Console + charts + HTML report
+    ├── runner.py             # Orchestrates: baseline → reducers → detectors → scores
+    ├── evaluator.py          # Computes score reductions, win rates, comparisons
+    └── reporter.py           # Console tables + charts + HTML report
 ```
 
 ---
@@ -142,38 +166,72 @@ hallucination_benchmark/
 ## ⚙️ config.yaml Key Settings
 
 ```yaml
-# Which models to run ([] = all installed models)
-selected_models: ["llama3.2-3b", "mistral-7b"]
-
 # Ollama server (change for remote)
 ollama:
   host: "http://localhost:11434"
 
-# Number of stochastic samples for BERT method (more = better recall, slower)
-detectors:
-  bert_stochastic:
-    n_samples: 5
-
-# Max samples per dataset
+# Datasets — each sample has: question, context, right_answer, hallucinated_answer
 datasets:
   - name: "halueval_qa"
-    max_samples: 150
+    source: "hf"
+    hf_path: "pminervini/HaluEval"
+    hf_subset: "qa_samples"
+    max_samples: 50
+
+# Reduction methods to apply
+reducers:
+  rag:
+    enabled: true
+  constrained_decoding:
+    enabled: true
+    temperature: 0.1
+    top_p: 0.3
+    top_k: 5
+  self_verification:
+    enabled: true
+
+# Detection methods to score each answer
+detectors:
+  token_similarity:
+    enabled: true
+  semantic_similarity:
+    enabled: true
+  llm_based:
+    enabled: true
+  bert_stochastic:
+    enabled: true
+    n_samples: 3
 ```
 
 ---
 
 ## 📊 Output Files
 
+After running, you'll find these in the `results/` folder:
+
 ```
 results/
-├── report.html              # Self-contained HTML report with all charts
-├── all_results.csv          # Every prediction from every model/detector
-├── summary.json             # Per-(model × method) metrics
-├── method_comparison.png    # Bar chart: all 4 methods side by side
-├── model_method_heatmap.png # Heatmap: F1 score for each model × method
-├── score_distributions.png  # Violin plots: scores split by ground truth
-├── precision_recall.png     # PR scatter with F1 annotations
-└── benchmark.log            # Full run log
+├── all_results.csv                # One row per (model × sample × reducer) with all detector scores
+├── report.html                    # Self-contained HTML report with charts and tables
+├── summary.json                   # Per-(model × reducer) averaged metrics
+├── before_after_per_reducer.png   # Grouped bar chart: baseline vs each reducer across detectors
+├── per_detector_comparison.png    # One subplot per detector showing scores by reducer
+├── score_reductions.png           # How much each reducer lowered scores vs baseline
+└── benchmark.log                  # Full run log
+```
+
+### Sample Output Table
+
+```
+┌──────────────────────┬──────────┬──────────┬──────────┬──────────┐
+│ Reducer              │ Token    │ Semantic │ LLM      │ BERT     │
+├──────────────────────┼──────────┼──────────┼──────────┼──────────┤
+│ Baseline (no reducer)│ 0.750    │ 0.800    │ 0.700    │ 0.850    │
+│ RAG                  │ 0.150    │ 0.200    │ 0.100    │ 0.300    │
+│ Constrained Decoding │ 0.550    │ 0.600    │ 0.500    │ 0.700    │
+│ Self-Verification    │ 0.400    │ 0.450    │ 0.350    │ 0.550    │
+└──────────────────────┴──────────┴──────────┴──────────┴──────────┘
+Lower scores = less hallucination. Compare each reducer to the baseline row.
 ```
 
 ---
@@ -182,6 +240,12 @@ results/
 
 - [AWS ML Blog: Detect hallucinations for RAG-based systems (2025)](https://aws.amazon.com/blogs/machine-learning/detect-hallucinations-for-rag-based-systems/)
 - [HaluEval benchmark](https://arxiv.org/abs/2305.11747)
-- [RAGBench benchmark](https://arxiv.org/abs/2407.11005)
 - [BERTScore paper](https://arxiv.org/abs/1904.09675)
 - [Ollama model library](https://ollama.com/library)
+
+---
+
+## 👥 Contributors
+
+- Dr. Bharat Rawal — Grambling State University, Department of Computer Science and Digital Technologies
+- QASC — Quantum-Enhanced AI and Secure Computing
