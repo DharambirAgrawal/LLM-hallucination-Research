@@ -30,8 +30,8 @@ class BenchmarkSample:
     dataset:        str
     question:       str
     context:        str
-    answer:         str
-    is_hallucinated: bool           # ground-truth label
+    right_answer:         str
+    hallucinated_answer: bool           # ground-truth label
     metadata:       dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
