@@ -532,18 +532,38 @@ class Reporter:
 
         # Overall charts (if present)
         overall_charts = [
-            ("overall_hallucination_scores.png", "Overall hallucination scores"),
-            ("overall_score_reductions.png", "Overall score reductions"),
-            ("overall_latency.png", "Overall latency"),
-            ("overall_per_detector.png", "Overall per-detector scores"),
+            (
+                "overall_hallucination_scores.png",
+                "Overall hallucination scores",
+                "Average detector scores across all models and datasets in this run folder. "
+                "Baseline means no reduction method was applied. Lower is better.",
+            ),
+            (
+                "overall_score_reductions.png",
+                "Overall score reductions",
+                "Improvement relative to baseline, computed as baseline score minus reducer score. "
+                "Positive values mean the reducer helped. Higher is better.",
+            ),
+            (
+                "overall_latency.png",
+                "Overall latency",
+                "Average answer time per method across all models and datasets in this run folder. "
+                "Lower is faster.",
+            ),
+            (
+                "overall_per_detector.png",
+                "Overall per-detector scores",
+                "Same comparison as above, split by detector. Lower is better.",
+            ),
         ]
-        if any((self.output_dir / p).exists() for p, _ in overall_charts):
+        if any((self.output_dir / p).exists() for p, _, _ in overall_charts):
             html_parts.append("<h2>Overall Results (All Models)</h2>")
             html_parts.append(
                 "<p class='caption'>Averaged across all models/datasets in this run folder.</p>"
             )
-            for p, alt in overall_charts:
+            for p, alt, desc in overall_charts:
                 if (self.output_dir / p).exists():
+                    html_parts.append(f"<p class='caption'>{desc}</p>")
                     html_parts.append(f"<img src='{p}' alt='{alt}'>")
 
         # Per-model sections
@@ -560,6 +580,10 @@ class Reporter:
                 scores_chart = f"{safe_name}_hallucination_scores.png"
                 if (self.output_dir / scores_chart).exists():
                     html_parts.append(
+                        "<p class='caption'>Baseline is the no-reduction answer. "
+                        "This chart compares baseline against each reduction method. Lower is better.</p>"
+                    )
+                    html_parts.append(
                         f"<img src='{scores_chart}' "
                         f"alt='Hallucination scores for {model_name}'>"
                     )
@@ -567,6 +591,10 @@ class Reporter:
                 # Reductions chart
                 reductions_chart = f"{safe_name}_score_reductions.png"
                 if (self.output_dir / reductions_chart).exists():
+                    html_parts.append(
+                        "<p class='caption'>This shows improvement relative to baseline. "
+                        "Positive values mean the reducer lowered hallucination score. Higher is better.</p>"
+                    )
                     html_parts.append(
                         f"<img src='{reductions_chart}' "
                         f"alt='Score reductions for {model_name}'>"
@@ -576,6 +604,10 @@ class Reporter:
                 detector_chart = f"{safe_name}_per_detector.png"
                 if (self.output_dir / detector_chart).exists():
                     html_parts.append(
+                        "<p class='caption'>Each subplot is one detector's average score for baseline and reducers. "
+                        "Lower is better.</p>"
+                    )
+                    html_parts.append(
                         f"<img src='{detector_chart}' "
                         f"alt='Per-detector scores for {model_name}'>"
                     )
@@ -583,6 +615,9 @@ class Reporter:
                 # Latency chart
                 latency_chart = f"{safe_name}_latency.png"
                 if (self.output_dir / latency_chart).exists():
+                    html_parts.append(
+                        "<p class='caption'>Average answer time per method. Lower is faster.</p>"
+                    )
                     html_parts.append(
                         f"<img src='{latency_chart}' "
                         f"alt='Latency per reducer for {model_name}'>"
@@ -642,12 +677,19 @@ class Reporter:
         def _safe(name: str) -> str:
             return name.replace(":", "_").replace("/", "_").replace(" ", "_")
 
-        def _add_picture(doc: Document, rel_path: str, caption: Optional[str] = None):
+        def _add_picture(
+            doc: Document,
+            rel_path: str,
+            caption: Optional[str] = None,
+            description: Optional[str] = None,
+        ):
             p = self.output_dir / rel_path
             if not p.exists():
                 return
             if caption:
                 doc.add_paragraph(caption)
+            if description:
+                doc.add_paragraph(description)
             # 6.5" fits comfortably on US Letter with default margins
             doc.add_picture(str(p), width=Inches(6.5))
 
@@ -683,20 +725,46 @@ class Reporter:
         doc.add_heading("Hallucination Reduction Experiment Report", level=0)
         doc.add_paragraph(
             "This report includes tables and figures generated by the benchmark. "
+            "Baseline means no reduction method was applied. "
+            "RAG, Constrained Decoding, and Self-Verification are reduction methods. "
             "Lower detector scores mean less hallucination."
         )
 
         # Overall charts
         overall_charts = [
-            ("overall_hallucination_scores.png", "Overall hallucination scores"),
-            ("overall_per_detector.png", "Overall per-detector scores"),
-            ("overall_score_reductions.png", "Overall score reductions vs baseline"),
-            ("overall_latency.png", "Overall latency"),
+            (
+                "overall_hallucination_scores.png",
+                "Overall hallucination scores",
+                "Average detector scores across all models and datasets in this folder. "
+                "Baseline is the no-reduction answer. Lower is better.",
+            ),
+            (
+                "overall_per_detector.png",
+                "Overall per-detector scores",
+                "Same comparison, split by detector. Use this to see whether one detector "
+                "disagrees with the others. Lower is better.",
+            ),
+            (
+                "overall_score_reductions.png",
+                "Overall score reductions vs baseline",
+                "Improvement relative to baseline, computed as baseline score minus reducer score. "
+                "Positive values mean the reducer helped. Higher is better.",
+            ),
+            (
+                "overall_latency.png",
+                "Overall latency",
+                "Average answer time per method across all models and datasets in this folder. "
+                "Lower is faster.",
+            ),
         ]
         if any((self.output_dir / p).exists() for p, _ in overall_charts):
             doc.add_heading("Overall Results (All Models)", level=1)
-            for rel, caption in overall_charts:
-                _add_picture(doc, rel, caption)
+            doc.add_paragraph(
+                "These overall figures average the results across all models and datasets "
+                "present in this output folder."
+            )
+            for rel, caption, description in overall_charts:
+                _add_picture(doc, rel, caption, description)
 
         # Per-model sections
         if summary_df is not None and len(summary_df) > 0 and "model" in summary_df.columns:
@@ -704,10 +772,33 @@ class Reporter:
             for model_name in summary_df["model"].unique():
                 safe = _safe(str(model_name))
                 doc.add_heading(f"Model: {model_name}", level=2)
-                _add_picture(doc, f"{safe}_hallucination_scores.png")
-                _add_picture(doc, f"{safe}_per_detector.png")
-                _add_picture(doc, f"{safe}_score_reductions.png")
-                _add_picture(doc, f"{safe}_latency.png")
+                _add_picture(
+                    doc,
+                    f"{safe}_hallucination_scores.png",
+                    "Hallucination scores: baseline vs reduction methods",
+                    "This compares the model's no-reduction baseline answer against each reduction method. "
+                    "Bars are averaged across this model's samples in the folder. Lower is better.",
+                )
+                _add_picture(
+                    doc,
+                    f"{safe}_per_detector.png",
+                    "Per-detector hallucination scores",
+                    "Each subplot shows one detector's average score for baseline and each reducer. "
+                    "Lower is better.",
+                )
+                _add_picture(
+                    doc,
+                    f"{safe}_score_reductions.png",
+                    "Score reductions vs baseline",
+                    "This shows how much each reducer improved over baseline. "
+                    "Positive values mean less hallucination than baseline. Higher is better.",
+                )
+                _add_picture(
+                    doc,
+                    f"{safe}_latency.png",
+                    "Latency by method",
+                    "Average answer time for baseline and each reducer. Lower is faster.",
+                )
 
         # Tables
         doc.add_heading("Summary Table (Mean Scores)", level=1)
