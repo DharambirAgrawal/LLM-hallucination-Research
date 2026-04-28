@@ -757,7 +757,7 @@ class Reporter:
                 "Lower is faster.",
             ),
         ]
-        if any((self.output_dir / p).exists() for p, _ in overall_charts):
+        if any((self.output_dir / p).exists() for p, _, _ in overall_charts):
             doc.add_heading("Overall Results (All Models)", level=1)
             doc.add_paragraph(
                 "These overall figures average the results across all models and datasets "
