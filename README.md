@@ -26,6 +26,28 @@ For each question in the dataset:
 
 ---
 
+## 🔄 Experiment Flowchart
+
+```mermaid
+flowchart TD
+    A([Start]) --> B[Load Question\nfrom Dataset]
+    B --> C[Model generates\nBaseline Answer]
+    C --> D[Detectors score\nBaseline Answer\nvs Correct Answer]
+    D --> E{Scores:\nToken, Semantic,\nBERT, LLM Judge}
+    E --> F[Apply Reducer\nRAG / Constrained\nDecoding / Self-Verify]
+    F --> G[Model generates\nReduced Answer]
+    G --> H[Detectors score\nReduced Answer\nvs Correct Answer]
+    H --> I{New Scores:\nToken, Semantic,\nBERT, LLM Judge}
+    I --> J[Compare Scores\nBefore vs After]
+    J --> K([Did the reducer\nlower hallucination?])
+
+    style A fill:#2ECC71,color:#fff
+    style K fill:#3498DB,color:#fff
+    style D fill:#E74C3C,color:#fff
+    style H fill:#E74C3C,color:#fff
+    style F fill:#F39C12,color:#fff
+```
+
 ## ⚡ Quick Start (3 commands)
 
 ```bash

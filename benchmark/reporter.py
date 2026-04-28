@@ -24,7 +24,8 @@ from loguru import logger
 from rich.console import Console
 from rich.table import Table
 from rich import box
-
+import matplotlib.pyplot as plt
+import numpy as np
 
 console = Console()
 
@@ -157,42 +158,55 @@ class Reporter:
     # ══════════════════════════════════════════════════════════
 
     def save_charts(self, summary_df: pd.DataFrame, reduction_df: pd.DataFrame = None):
-        """Save all charts as PNG files in the output directory."""
-        import matplotlib.pyplot as plt
+        """Save one set of charts per model."""
         import matplotlib
-        matplotlib.use("Agg")  # Non-interactive backend
+        matplotlib.use("Agg")
 
         score_cols = [c for c in DETECTOR_LABELS if c in summary_df.columns]
         if not score_cols:
             logger.warning("No detector scores to plot.")
             return
 
-        self._plot_before_after(summary_df, score_cols)
-        self._plot_per_detector_subplots(summary_df, score_cols)
+        # Generate one set of charts per model
+        for model_name, model_df in summary_df.groupby("model"):
+            logger.info(f"  Generating charts for model: {model_name}")
 
-        if reduction_df is not None and len(reduction_df) > 0:
-            self._plot_reductions(reduction_df)
+            # Chart 1: Raw scores — baseline vs reducers across all detectors
+            self._plot_before_after(model_df, score_cols, model_name)
 
-        logger.info(f"✓ Charts saved to {self.output_dir}")
+            # Chart 2: Per detector subplots
+            self._plot_per_detector_subplots(model_df, score_cols, model_name)
 
-    def _plot_before_after(self, summary_df: pd.DataFrame, score_cols: list):
+            # Chart 3: Score reductions vs baseline
+            if reduction_df is not None and len(reduction_df) > 0:
+                model_reduction = reduction_df[
+                    reduction_df["model"] == model_name
+                ].copy()
+                if len(model_reduction) > 0:
+                    self._plot_reductions(model_reduction, model_name)
+
+        logger.info(f"✓ All charts saved to {self.output_dir}")
+
+    def _plot_before_after(self, summary_df: pd.DataFrame, score_cols: list, model_name: str):
         """
-        Grouped bar chart: one group per detector, bars for each reducer.
-        Shows baseline vs each reducer side by side.
+        Grouped bar chart for one model:
+        - Groups = detectors (Token, Semantic, BERT, LLM)
+        - Bars within each group = reducers (Baseline, RAG, Constrained, Self-Verify)
+        
+        Shows raw hallucination scores before and after each reducer,
+        scored by all detectors. Lower = less hallucination = better.
         """
         import matplotlib.pyplot as plt
         import numpy as np
 
-        # Average across models and datasets for the overall picture
+        # Average scores per reducer for this model
         avg = summary_df.groupby("reducer")[score_cols].mean().round(4)
 
-        # Order: baseline first, then others
-        reducer_order = ["baseline"] + [
-            r for r in avg.index if r != "baseline"
-        ]
+        # Always show baseline first
+        reducer_order = ["baseline"] + [r for r in avg.index if r != "baseline"]
         avg = avg.loc[[r for r in reducer_order if r in avg.index]]
 
-        fig, ax = plt.subplots(figsize=(12, 6))
+        fig, ax = plt.subplots(figsize=(14, 7))
         x = np.arange(len(score_cols))
         width = 0.8 / len(avg)
 
@@ -213,30 +227,41 @@ class Reporter:
                     bar.get_height() + 0.01,
                     f"{val:.2f}",
                     ha="center", va="bottom",
-                    fontsize=9,
+                    fontsize=9, fontweight="bold",
                 )
 
         ax.set_xticks(x)
-        ax.set_xticklabels([DETECTOR_LABELS[c] for c in score_cols], fontsize=11)
-        ax.set_ylabel("Hallucination Score (lower is better)", fontsize=12)
+        ax.set_xticklabels(
+            [DETECTOR_LABELS[c] for c in score_cols],
+            fontsize=11
+        )
+        ax.set_ylabel("Hallucination Score (lower = better)", fontsize=12)
         ax.set_title(
-            "Hallucination Scores by Reducer (Lower = Less Hallucination)",
+            f"Model: {model_name}\n"
+            f"Hallucination Scores — Baseline vs Reducers (all detectors)",
             fontsize=14, fontweight="bold", pad=15,
         )
-        ax.set_ylim(0, 1.1)
+        ax.set_ylim(0, 1.15)
+        ax.axhline(
+            y=0.5, color="gray", linestyle="--",
+            alpha=0.4, label="0.5 threshold"
+        )
         ax.legend(loc="upper right", framealpha=0.9)
         ax.grid(axis="y", alpha=0.3, linestyle="--")
 
+        # Safe filename — remove special chars from model name
+        safe_name = model_name.replace(":", "_").replace("/", "_").replace(" ", "_")
         plt.tight_layout()
-        path = self.output_dir / "before_after_per_reducer.png"
+        path = self.output_dir / f"{safe_name}_hallucination_scores.png"
         plt.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
         plt.close()
         logger.info(f"  Saved: {path}")
 
-    def _plot_per_detector_subplots(self, summary_df: pd.DataFrame, score_cols: list):
+    def _plot_per_detector_subplots(self, summary_df: pd.DataFrame, score_cols: list, model_name: str):
         """
-        One subplot per detector. Within each subplot:
-        bar chart of scores per reducer (averaged across models).
+        One subplot per detector for a specific model.
+        Each subplot shows scores per reducer (Baseline, RAG, Constrained, Self-Verify)
+        for that detector specifically.
         """
         import matplotlib.pyplot as plt
 
@@ -262,7 +287,7 @@ class Reporter:
             labels   = [REDUCER_LABELS.get(r, r) for r in reducers]
 
             bars = ax.bar(labels, values, color=colors,
-                          edgecolor="white", linewidth=1.2, width=0.6)
+                        edgecolor="white", linewidth=1.2, width=0.6)
             for bar, val in zip(bars, values):
                 ax.text(
                     bar.get_x() + bar.get_width() / 2,
@@ -272,30 +297,44 @@ class Reporter:
                     fontsize=10, fontweight="bold",
                 )
 
-            ax.set_title(DETECTOR_LABELS[col], fontsize=12, fontweight="bold")
-            ax.set_ylabel("Mean Score")
-            ax.set_ylim(0, 1.1)
+            # Each subplot title = detector name
+            ax.set_title(
+                f"{DETECTOR_LABELS[col]}\nModel: {model_name}",
+                fontsize=11, fontweight="bold"
+            )
+            ax.set_ylabel("Hallucination Score (lower = better)")
+            ax.set_ylim(0, 1.15)
+            ax.axhline(y=0.5, color="gray", linestyle="--", alpha=0.4)
             ax.grid(axis="y", alpha=0.3, linestyle="--")
             ax.tick_params(axis="x", rotation=20)
 
-        # Hide unused subplots
+        # Hide unused subplots if detectors < grid size
         for j in range(len(score_cols), len(axes)):
             axes[j].axis("off")
 
         fig.suptitle(
-            "Per-Detector Scores Across Reducers",
-            fontsize=15, fontweight="bold", y=1.02,
+            f"Model: {model_name}\n"
+            f"Per-Detector Hallucination Scores — Baseline vs Reducers",
+            fontsize=14, fontweight="bold", y=1.02,
         )
         plt.tight_layout()
-        path = self.output_dir / "per_detector_comparison.png"
+
+        # Save with model name in filename
+        safe_name = model_name.replace(":", "_").replace("/", "_").replace(" ", "_")
+        path = self.output_dir / f"{safe_name}_per_detector.png"
         plt.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
         plt.close()
         logger.info(f"  Saved: {path}")
 
-    def _plot_reductions(self, reduction_df: pd.DataFrame):
+    def _plot_reductions(self, reduction_df: pd.DataFrame, model_name: str):
         """
-        Bar chart showing how much each reducer lowered scores vs baseline.
-        Positive = good (reduced hallucination). Negative = bad (made it worse).
+        Grouped bar chart for one model showing score REDUCTION vs baseline.
+        
+        - Groups = detectors (Token, Semantic, BERT, LLM)
+        - Bars within each group = reducers (RAG, Constrained, Self-Verify)
+        
+        Positive value = reducer lowered hallucination score (good).
+        Negative value = reducer made things worse (bad).
         """
         import matplotlib.pyplot as plt
         import numpy as np
@@ -304,7 +343,6 @@ class Reporter:
         if not reduction_cols:
             return
 
-        # Average across models
         avg = reduction_df.groupby("reducer")[reduction_cols].mean().round(4)
 
         fig, ax = plt.subplots(figsize=(12, 6))
@@ -330,30 +368,35 @@ class Reporter:
                     bar.get_x() + bar.get_width() / 2,
                     y_pos + offset_y,
                     f"{val:+.2f}",
-                    ha="center", va=va, fontsize=9,
+                    ha="center", va=va,
+                    fontsize=9,
                 )
 
-        ax.axhline(0, color="black", linewidth=0.8)
+        ax.axhline(0, color="black", linewidth=1.2)
         detector_labels = [
             DETECTOR_LABELS.get(c.replace("_reduction", "_score"), c)
             for c in reduction_cols
         ]
         ax.set_xticks(x)
         ax.set_xticklabels(detector_labels, fontsize=11)
-        ax.set_ylabel("Score Reduction vs Baseline\n(higher = better)", fontsize=12)
+        ax.set_ylabel(
+            "Score Reduction vs Baseline\n(positive = less hallucination)",
+            fontsize=12
+        )
         ax.set_title(
-            "Hallucination Score Reduction by Reducer",
+            f"Model: {model_name}\n"
+            f"How Much Each Reducer Lowered Hallucination Scores",
             fontsize=14, fontweight="bold", pad=15,
         )
         ax.legend(loc="upper right", framealpha=0.9)
         ax.grid(axis="y", alpha=0.3, linestyle="--")
 
+        safe_name = model_name.replace(":", "_").replace("/", "_").replace(" ", "_")
         plt.tight_layout()
-        path = self.output_dir / "score_reductions.png"
+        path = self.output_dir / f"{safe_name}_score_reductions.png"
         plt.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
         plt.close()
         logger.info(f"  Saved: {path}")
-
     # ══════════════════════════════════════════════════════════
     # Output files
     # ══════════════════════════════════════════════════════════
@@ -373,9 +416,9 @@ class Reporter:
         logger.info(f"  Saved: {path}")
 
     def save_html_report(self, summary_df: pd.DataFrame,
-                         reduction_df: Optional[pd.DataFrame] = None,
-                         results_df: Optional[pd.DataFrame] = None):
-        """Save a simple self-contained HTML report."""
+                     reduction_df: Optional[pd.DataFrame] = None,
+                     results_df: Optional[pd.DataFrame] = None):
+        """Save a self-contained HTML report with per-model charts and tables."""
         html_parts = [
             "<!DOCTYPE html><html><head>",
             "<meta charset='utf-8'>",
@@ -385,6 +428,7 @@ class Reporter:
             "margin: 2em auto; padding: 0 1em; color: #333; }",
             "h1 { border-bottom: 3px solid #3498DB; padding-bottom: 10px; }",
             "h2 { color: #2C3E50; margin-top: 2em; }",
+            "h3 { color: #7F8C8D; }",
             "table { border-collapse: collapse; margin: 1em 0; width: 100%; }",
             "th { background: #3498DB; color: white; padding: 8px 12px; text-align: left; }",
             "td { padding: 6px 12px; border-bottom: 1px solid #ddd; }",
@@ -392,36 +436,69 @@ class Reporter:
             "img { max-width: 100%; margin: 1em 0; border: 1px solid #ddd; "
             "border-radius: 4px; }",
             ".caption { color: #666; font-size: 0.9em; margin: 0.5em 0; }",
+            ".model-section { border: 1px solid #ddd; border-radius: 8px; "
+            "padding: 1em; margin: 2em 0; }",
             "</style></head><body>",
-            "<h1>Hallucination Reduction Experiment</h1>",
-            "<p class='caption'>Testing how different reduction methods "
-            "affect LLM hallucination scores, measured by multiple detectors.</p>",
+            "<h1>Hallucination Reduction Experiment Report</h1>",
+            "<p class='caption'>Testing how RAG, Constrained Decoding, and "
+            "Self-Verification reduce LLM hallucination scores, "
+            "measured by 4 detectors (Token, Semantic, BERT, LLM Judge).</p>",
         ]
 
-        # Charts
-        for chart_name, chart_title in [
-            ("before_after_per_reducer.png", "Scores by Reducer (All Detectors)"),
-            ("per_detector_comparison.png", "Per-Detector Comparison"),
-            ("score_reductions.png", "Score Reductions vs Baseline"),
-        ]:
-            chart_path = self.output_dir / chart_name
-            if chart_path.exists():
-                html_parts.append(f"<h2>{chart_title}</h2>")
-                html_parts.append(f"<img src='{chart_name}' alt='{chart_title}'>")
-
-        # Summary table
+        # Per-model sections
         if summary_df is not None and len(summary_df) > 0:
-            html_parts.append("<h2>Mean Scores per (Model × Reducer × Dataset)</h2>")
-            html_parts.append(summary_df.to_html(index=False, float_format="%.3f"))
+            html_parts.append("<h2>Per-Model Results</h2>")
 
-        # Reduction table
+            for model_name in summary_df["model"].unique():
+                safe_name = model_name.replace(":", "_").replace(
+                    "/", "_").replace(" ", "_")
+                html_parts.append(f"<div class='model-section'>")
+                html_parts.append(f"<h3>Model: {model_name}</h3>")
+
+                # Scores chart
+                scores_chart = f"{safe_name}_hallucination_scores.png"
+                if (self.output_dir / scores_chart).exists():
+                    html_parts.append(
+                        f"<img src='{scores_chart}' "
+                        f"alt='Hallucination scores for {model_name}'>"
+                    )
+
+                # Reductions chart
+                reductions_chart = f"{safe_name}_score_reductions.png"
+                if (self.output_dir / reductions_chart).exists():
+                    html_parts.append(
+                        f"<img src='{reductions_chart}' "
+                        f"alt='Score reductions for {model_name}'>"
+                    )
+
+                # Per-detector chart
+                detector_chart = f"{safe_name}_per_detector.png"
+                if (self.output_dir / detector_chart).exists():
+                    html_parts.append(
+                        f"<img src='{detector_chart}' "
+                        f"alt='Per-detector scores for {model_name}'>"
+                    )
+
+                # Per-model summary table
+                model_summary = summary_df[summary_df["model"] == model_name]
+                score_cols = [c for c in DETECTOR_LABELS if c in model_summary.columns]
+                display_cols = ["reducer", "dataset"] + score_cols + ["n_samples"]
+                display_cols = [c for c in display_cols if c in model_summary.columns]
+                html_parts.append(
+                    model_summary[display_cols].to_html(index=False, float_format="%.3f")
+                )
+                html_parts.append("</div>")
+
+        # Overall reduction table across all models
         if reduction_df is not None and len(reduction_df) > 0:
-            html_parts.append("<h2>Score Reductions vs Baseline</h2>")
+            html_parts.append("<h2>Score Reductions vs Baseline (All Models)</h2>")
             html_parts.append(
-                "<p class='caption'>Positive values mean the reducer lowered "
-                "the hallucination score (good).</p>"
+                "<p class='caption'>Positive = reducer lowered hallucination score. "
+                "Higher = better.</p>"
             )
-            html_parts.append(reduction_df.to_html(index=False, float_format="%.3f"))
+            html_parts.append(
+                reduction_df.to_html(index=False, float_format="%.3f")
+            )
 
         html_parts.append("</body></html>")
 

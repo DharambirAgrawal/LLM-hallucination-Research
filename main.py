@@ -285,6 +285,35 @@ def main():
     from benchmark.evaluator import Evaluator
     from benchmark.reporter import Reporter
  
+    # ── Interactive prompts ───────────────────────────────────────
+    console = Console()
+
+    console.rule("[bold cyan]Experiment Setup[/bold cyan]")
+
+    # Ask how many samples to run
+    try:
+        n_samples = int(console.input(
+            "[bold yellow]How many questions from HaluEval QA? [/bold yellow]"
+            "[dim](press Enter for default 50)[/dim]: "
+        ).strip() or "50")
+    except ValueError:
+        n_samples = 50
+    console.print(f"  ✓ Questions: [green]{n_samples}[/green]")
+
+    # Ask how many times to run (for consistency check)
+    try:
+        n_runs = int(console.input(
+            "[bold yellow]How many runs? [/bold yellow]"
+            "[dim](multiple runs check consistency, press Enter for 1)[/dim]: "
+        ).strip() or "1")
+    except ValueError:
+        n_runs = 1
+    console.print(f"  ✓ Number of runs: [green]{n_runs}[/green]\n")
+
+    # Override config with user input
+    for ds in config.get("datasets", []):
+        ds["max_samples"] = n_samples
+
     # ── Load datasets ─────────────────────────────────────────
     logger.info("\n[3/6] Loading datasets...")
     loader   = DatasetLoader(config, seed=config.get("benchmark", {}).get("seed", 42))
@@ -332,32 +361,82 @@ def main():
     logger.info(f"  Reducers:  baseline, {', '.join(enabled_red)}")
     logger.info(f"  Datasets:  {', '.join(datasets.keys())}")
  
-    # ── Run benchmark ─────────────────────────────────────────
-    logger.info("\n[5/6] Running reduction experiment...")
-    runner     = BenchmarkRunner(config)
-    results_df = runner.run(models, datasets)
- 
+    # ── Run benchmark (multiple runs for consistency) ─────────────
+    logger.info(f"\n[5/6] Running experiment ({n_runs} run(s))...")
+
+    all_run_results = []
+    for run_idx in range(n_runs):
+        if n_runs > 1:
+            logger.info(f"\n  === RUN {run_idx + 1} of {n_runs} ===")
+        runner     = BenchmarkRunner(config)
+        results_df = runner.run(models, datasets)
+        results_df["run"] = run_idx + 1
+        all_run_results.append(results_df)
+
+    # Combine all runs
+    combined_df = pd.concat(all_run_results, ignore_index=True)
+
+    # If multiple runs, save consistency stats (std deviation across runs)
+    # Low std dev = consistent results across runs = trustworthy
+    if n_runs > 1:
+        score_cols = ["token_score", "semantic_score", "bert_score", "llm_score"]
+        score_cols = [c for c in score_cols if c in combined_df.columns]
+        consistency = (
+            combined_df.groupby(["model", "sample_id", "reducer"])[score_cols]
+            .std()
+            .round(4)
+            .reset_index()
+        )
+        consistency_path = Path(out_dir) / "consistency_std.csv"
+        consistency.to_csv(consistency_path, index=False)
+        logger.info(f"  Consistency (std dev) saved to: {consistency_path}")
+        logger.info(f"  Low std dev = consistent results across {n_runs} runs")
+
+    # Average scores across all runs for final evaluation
+    score_cols_present = [
+        c for c in ["token_score", "semantic_score", "bert_score", "llm_score"]
+        if c in combined_df.columns
+    ]
+    results_df = (
+        combined_df.groupby(["model", "dataset", "sample_id", "reducer"])
+                   [score_cols_present]
+                   .mean()
+                   .round(4)
+                   .reset_index()
+    )
+
     # ── Evaluate & report ─────────────────────────────────────
     logger.info("\n[6/6] Evaluating and generating reports...")
-    evaluator = Evaluator()
+    evaluator    = Evaluator()
     summary_df   = evaluator.evaluate(results_df)
     reduction_df = evaluator.reducer_comparison(results_df)
- 
-    out_dir = config.get("benchmark", {}).get("output_dir", "results")
+
+    out_dir  = config.get("benchmark", {}).get("output_dir", "results")
     reporter = Reporter(output_dir=out_dir)
+
+    # Console output — per model tables
     reporter.print_summary(summary_df)
     reporter.print_reduction_table(reduction_df)
+
+    # Charts — one set per model (updated reporter handles this)
     reporter.save_charts(summary_df, reduction_df)
+
+    # Save files
     reporter.save_json_summary(summary_df, reduction_df)
     reporter.save_html_report(summary_df, reduction_df, results_df)
- 
+
+    # Save raw results CSV
     out = Path(out_dir)
+    results_df.to_csv(out / "all_results.csv", index=False)
+
     c.print(f"\n[bold green]✓ Experiment complete![/bold green]")
     c.print(f"  📁 Raw CSV:        [cyan]{out / 'all_results.csv'}[/cyan]")
     c.print(f"  📄 HTML Report:    [cyan]{out / 'report.html'}[/cyan]")
-    c.print(f"  📊 Charts:         [cyan]{out}/*.png[/cyan]")
+    c.print(f"  📊 Charts:         [cyan]{out}/<model_name>_*.png[/cyan]")
     c.print(f"  📋 JSON Summary:   [cyan]{out / 'summary.json'}[/cyan]")
- 
- 
+    if n_runs > 1:
+        c.print(f"  📈 Consistency:    [cyan]{out / 'consistency_std.csv'}[/cyan]")
+
+
 if __name__ == "__main__":
     main()
