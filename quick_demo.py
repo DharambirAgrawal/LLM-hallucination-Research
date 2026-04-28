@@ -167,11 +167,10 @@ def main():
     c.rule("[bold green]✅ Demo complete![/bold green]")
     c.print()
     c.print("  Next steps:")
-    c.print("  [cyan]ollama pull llama3.2:3b[/cyan]")
-    c.print("  [cyan]python main.py --models llama3.2-3b[/cyan]")
     c.print("  [cyan]python main.py --list-models[/cyan]       ← see installed models")
-    c.print("  [cyan]python main.py --list-available[/cyan]    ← see all config.yaml models")
-    c.print("  [cyan]python main.py --pull mistral:7b gemma3:4b[/cyan]  ← pull + run")
+    c.print("  [cyan]python main.py --list-available[/cyan]    ← see models configured in config.yaml")
+    c.print("  [cyan]python main.py --models <name> --datasets synthetic --samples 5 --runs 1 --no-prompt[/cyan]")
+    c.print("  [dim]Tip: --models expects the display name from config.yaml (models[].name).[/dim]")
     c.print()
 
 

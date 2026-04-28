@@ -34,8 +34,8 @@ models:
     auto_pull: false
 
   # ── DeepSeek family ───────────────────────────────────────
-  - name: "deepseek-r1-7b"
-    model: "deepseek-r1-7b"
+  - name: "deepseek-r1-7b:latest"
+    model: "deepseek-r1-7b:latest"
     family: "deepseek"
     auto_pull: false
 
@@ -48,7 +48,7 @@ models:
 # ── Which models to actually run ──────────────────────────────
 # Set to [] to run ALL models listed above (that are installed)
 # Or list specific names from this filtered top-company list
-selected_models: ["llama3:latest", "qwen2.5:latest", "deepseek-r1-7b","gpt-oss:latest","gemma4:e4b"]
+selected_models: ["llama3:latest", "qwen2.5:latest", "deepseek-r1-7b:latest","gpt-oss:latest","gemma4:e4b"]
 
 # ── Datasets ──────────────────────────────────────────────────
 datasets:

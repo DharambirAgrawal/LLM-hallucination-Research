@@ -315,6 +315,8 @@ class BenchmarkRunner:
 
     def _save_checkpoint(self, model_name: str, dataset_name: str, rows: List[dict]):
         """Save intermediate results after each (model × dataset)."""
-        path = self.output_dir / f"{model_name}_{dataset_name}.json"
+        safe_model = model_name.replace(":", "_").replace("/", "_").replace(" ", "_")
+        safe_ds = dataset_name.replace(":", "_").replace("/", "_").replace(" ", "_")
+        path = self.output_dir / f"{safe_model}_{safe_ds}.json"
         with open(path, "w") as f:
             json.dump(rows, f, indent=2, default=str)

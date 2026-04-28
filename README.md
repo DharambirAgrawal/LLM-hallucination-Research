@@ -55,30 +55,30 @@ flowchart TD
 curl -fsSL https://ollama.com/install.sh | sh   # Linux/Mac
 # Windows: download from https://ollama.com/download
 
-# 2. Pull models you want to test
-ollama pull deepseek-r1:7b
-ollama pull qwen2.5:7b
+# 2. Pull at least one model tag (must match a tag in config.yaml -> models[].model)
+# Tip: run `python main.py --list-available` to see the exact tags configured.
+ollama pull <model-tag>
 
 # 3. Run the experiment
 pip install -r requirements.txt
 python main.py
+
+# After it finishes, open:
+#   results/run_01/report.html      (per-run)
+#   results/combined/report.html    (average across runs)
+# PNG charts are saved next to each report.html.
 ```
 
 ---
 
-## 🤖 Supported Models (just add more to config.yaml!)
+## 🤖 Model Tags (add more to config.yaml)
 
-| Family | Models in config.yaml |
-|--------|----------------------|
-| **Meta / Llama** | llama3.2:3b, llama3.1:8b, llama3.3:70b |
-| **Google / Gemma** | gemma3:1b, gemma3:4b, gemma3:12b |
-| **Mistral** | mistral:7b, mistral-nemo:12b, mixtral:8x7b |
-| **Microsoft / Phi** | phi4:14b, phi3.5:3.8b |
-| **Alibaba / Qwen** | qwen2.5:7b, qwen2.5:14b, qwen2.5:72b |
-| **DeepSeek** | deepseek-r1:7b, deepseek-r1:14b |
-| **Cohere** | command-r7b:7b, aya-expanse:8b |
-| **TII / Falcon** | falcon3:7b |
-| **HuggingFace** | smollm2:1.7b |
+This benchmark can run *any* Ollama model tag.
+To see what this repo is currently configured to run, use:
+
+```bash
+python main.py --list-available
+```
 
 **Add ANY model** from https://ollama.com/library by editing `config.yaml`:
 ```yaml
@@ -104,13 +104,21 @@ python main.py --list-available
 python main.py --pull deepseek-r1:7b qwen2.5:7b
 
 # Run specific models only
-python main.py --models deepseek-r1-7b qwen2.5-7b
+# NOTE: --models expects the *model display names* from config.yaml (models[].name)
+# Tip: copy/paste names from: python main.py --list-available
+python main.py --models llama3:latest
 
 # Fast test (20 samples, synthetic only)
 python main.py --quick
 
+# Non-interactive run controls
+python main.py --runs 5 --samples 15 --no-prompt
+
 # Skip slow BERT stochastic detector
 python main.py --no-bert
+
+# Also generate a Word report (report.docx) with tables + embedded PNGs
+python main.py --docx
 
 # Use remote Ollama server
 python main.py --host http://192.168.1.10:11434
@@ -229,17 +237,41 @@ detectors:
 
 ## 📊 Output Files
 
-After running, you'll find these in the `results/` folder:
+After running, you'll find these under the configured output directory (default: `results/`).
+Each run gets its own folder, plus a final `combined/` folder with averaged results.
 
 ```
 results/
-├── all_results.csv                # One row per (model × sample × reducer) with all detector scores
-├── report.html                    # Self-contained HTML report with charts and tables
-├── summary.json                   # Per-(model × reducer) averaged metrics
-├── before_after_per_reducer.png   # Grouped bar chart: baseline vs each reducer across detectors
-├── per_detector_comparison.png    # One subplot per detector showing scores by reducer
-├── score_reductions.png           # How much each reducer lowered scores vs baseline
-└── benchmark.log                  # Full run log
+├── run_01/
+│   ├── all_results.csv                # Raw rows: (model × sample × reducer) with scores + answers
+│   ├── summary.csv                    # Mean scores per (model × dataset × reducer)
+│   ├── reductions.csv                 # Mean reduction vs baseline per (model × reducer)
+│   ├── report.html                    # HTML report (loads PNG charts from this folder)
+│   ├── report.docx                    # Word report with tables + embedded charts (only if --docx)
+│   ├── summary.json
+│   ├── config_used.yaml
+│   ├── benchmark.log
+│   ├── <model>_hallucination_scores.png
+│   ├── <model>_per_detector.png
+│   ├── <model>_score_reductions.png
+│   ├── <model>_latency.png
+│   ├── overall_hallucination_scores.png
+│   ├── overall_per_detector.png
+│   ├── overall_score_reductions.png
+│   └── overall_latency.png
+├── run_02/
+│   └── ...
+└── combined/
+  ├── all_results_all_runs.csv        # All runs concatenated (includes run column)
+  ├── all_results_mean.csv            # Averaged per-sample across runs (numeric columns)
+  ├── consistency_std.csv             # Std-dev across runs (only if runs > 1)
+  ├── summary.csv
+  ├── reductions.csv
+  ├── report.html
+  ├── report.docx
+  ├── summary.json
+  ├── benchmark.log
+  └── takeaways.md
 ```
 
 ### Sample Output Table

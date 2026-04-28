@@ -6,11 +6,16 @@ Generates reports and charts for the reduction experiment.
 Outputs:
   - Console tables (rich): per-model reducer comparison
   - Charts (matplotlib):
-      * reducer_comparison.png     - bar chart of mean scores per reducer
-      * score_reductions.png       - bar chart of reductions vs baseline
-      * per_detector_comparison.png - subplots for each detector
-      * before_after_per_reducer.png - grouped bars: baseline vs each reducer
-  - HTML report: self-contained file with all tables and charts
+            * <model>_hallucination_scores.png  - baseline vs reducers (all detectors)
+            * <model>_per_detector.png          - one subplot per detector
+            * <model>_score_reductions.png      - reduction vs baseline (positive is good)
+            * <model>_latency.png               - mean latency per reducer
+            * overall_hallucination_scores.png  - averaged across all models
+            * overall_per_detector.png          - averaged across all models, per-detector
+            * overall_score_reductions.png      - averaged across all models
+            * overall_latency.png               - averaged across all models
+    - HTML report: report.html (loads PNG charts from the same output folder)
+    - DOCX report (optional): report.docx with tables + embedded PNG charts
   - JSON summary
 """
 from __future__ import annotations
@@ -24,7 +29,6 @@ from loguru import logger
 from rich.console import Console
 from rich.table import Table
 from rich import box
-import matplotlib.pyplot as plt
 import numpy as np
 
 console = Console()
@@ -158,9 +162,27 @@ class Reporter:
     # ══════════════════════════════════════════════════════════
 
     def save_charts(self, summary_df: pd.DataFrame, reduction_df: pd.DataFrame = None):
-        """Save one set of charts per model."""
+        """Save one set of charts per model, plus overall charts across all models."""
         import matplotlib
         matplotlib.use("Agg")
+
+        import matplotlib.pyplot as plt
+
+        # Brighter, easier-to-read defaults
+        try:
+            plt.style.use("seaborn-v0_8-whitegrid")
+        except Exception:
+            pass
+        plt.rcParams.update({
+            "figure.facecolor": "white",
+            "axes.facecolor": "white",
+            "savefig.facecolor": "white",
+            "axes.titlesize": 14,
+            "axes.labelsize": 12,
+            "xtick.labelsize": 10,
+            "ytick.labelsize": 10,
+            "legend.fontsize": 10,
+        })
 
         score_cols = [c for c in DETECTOR_LABELS if c in summary_df.columns]
         if not score_cols:
@@ -177,6 +199,10 @@ class Reporter:
             # Chart 2: Per detector subplots
             self._plot_per_detector_subplots(model_df, score_cols, model_name)
 
+            # Chart 2b: Latency / performance (if available)
+            if "mean_latency_s" in model_df.columns:
+                self._plot_latency(model_df, model_name)
+
             # Chart 3: Score reductions vs baseline
             if reduction_df is not None and len(reduction_df) > 0:
                 model_reduction = reduction_df[
@@ -184,6 +210,15 @@ class Reporter:
                 ].copy()
                 if len(model_reduction) > 0:
                     self._plot_reductions(model_reduction, model_name)
+
+        # Overall charts (averaged across all models/datasets)
+        logger.info("  Generating overall charts (all models)")
+        self._plot_before_after(summary_df, score_cols, "overall")
+        self._plot_per_detector_subplots(summary_df, score_cols, "overall")
+        if "mean_latency_s" in summary_df.columns:
+            self._plot_latency(summary_df, "overall")
+        if reduction_df is not None and len(reduction_df) > 0:
+            self._plot_reductions(reduction_df, "overall")
 
         logger.info(f"✓ All charts saved to {self.output_dir}")
 
@@ -253,7 +288,7 @@ class Reporter:
         safe_name = model_name.replace(":", "_").replace("/", "_").replace(" ", "_")
         plt.tight_layout()
         path = self.output_dir / f"{safe_name}_hallucination_scores.png"
-        plt.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
+        plt.savefig(path, dpi=200, bbox_inches="tight", facecolor="white")
         plt.close()
         logger.info(f"  Saved: {path}")
 
@@ -322,7 +357,7 @@ class Reporter:
         # Save with model name in filename
         safe_name = model_name.replace(":", "_").replace("/", "_").replace(" ", "_")
         path = self.output_dir / f"{safe_name}_per_detector.png"
-        plt.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
+        plt.savefig(path, dpi=200, bbox_inches="tight", facecolor="white")
         plt.close()
         logger.info(f"  Saved: {path}")
 
@@ -394,7 +429,54 @@ class Reporter:
         safe_name = model_name.replace(":", "_").replace("/", "_").replace(" ", "_")
         plt.tight_layout()
         path = self.output_dir / f"{safe_name}_score_reductions.png"
-        plt.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
+        plt.savefig(path, dpi=200, bbox_inches="tight", facecolor="white")
+        plt.close()
+        logger.info(f"  Saved: {path}")
+
+    def _plot_latency(self, summary_df: pd.DataFrame, model_name: str):
+        """Bar chart of mean latency per reducer (averaged across datasets)."""
+        import matplotlib.pyplot as plt
+        if "mean_latency_s" not in summary_df.columns:
+            return
+
+        avg = (
+            summary_df.groupby("reducer")["mean_latency_s"]
+                      .mean()
+                      .round(4)
+        )
+        if len(avg) == 0:
+            return
+
+        reducer_order = ["baseline"] + [r for r in avg.index if r != "baseline"]
+        avg = avg.loc[[r for r in reducer_order if r in avg.index]]
+
+        fig, ax = plt.subplots(figsize=(11, 5))
+        labels = [REDUCER_LABELS.get(r, r) for r in avg.index]
+        colors = [REDUCER_COLORS.get(r, "#999999") for r in avg.index]
+        bars = ax.bar(labels, avg.values, color=colors, edgecolor="white", linewidth=1.2)
+
+        for bar, val in zip(bars, avg.values):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + (max(avg.values) * 0.02 if max(avg.values) else 0.01),
+                f"{val:.2f}s",
+                ha="center", va="bottom",
+                fontsize=10, fontweight="bold",
+            )
+
+        title_name = "Overall (all models)" if model_name == "overall" else f"Model: {model_name}"
+        ax.set_title(
+            f"{title_name}\nMean Latency per Answer — Baseline vs Reducers",
+            fontsize=14, fontweight="bold", pad=15,
+        )
+        ax.set_ylabel("Mean latency (seconds)")
+        ax.grid(axis="y", alpha=0.3, linestyle="--")
+        ax.tick_params(axis="x", rotation=15)
+
+        safe_name = model_name.replace(":", "_").replace("/", "_").replace(" ", "_")
+        plt.tight_layout()
+        path = self.output_dir / f"{safe_name}_latency.png"
+        plt.savefig(path, dpi=200, bbox_inches="tight", facecolor="white")
         plt.close()
         logger.info(f"  Saved: {path}")
     # ══════════════════════════════════════════════════════════
@@ -418,7 +500,10 @@ class Reporter:
     def save_html_report(self, summary_df: pd.DataFrame,
                      reduction_df: Optional[pd.DataFrame] = None,
                      results_df: Optional[pd.DataFrame] = None):
-        """Save a self-contained HTML report with per-model charts and tables."""
+        """Save an HTML report with per-model charts and tables.
+
+        Note: the HTML references PNG files in the same folder (it does not embed images).
+        """
         html_parts = [
             "<!DOCTYPE html><html><head>",
             "<meta charset='utf-8'>",
@@ -444,6 +529,22 @@ class Reporter:
             "Self-Verification reduce LLM hallucination scores, "
             "measured by 4 detectors (Token, Semantic, BERT, LLM Judge).</p>",
         ]
+
+        # Overall charts (if present)
+        overall_charts = [
+            ("overall_hallucination_scores.png", "Overall hallucination scores"),
+            ("overall_score_reductions.png", "Overall score reductions"),
+            ("overall_latency.png", "Overall latency"),
+            ("overall_per_detector.png", "Overall per-detector scores"),
+        ]
+        if any((self.output_dir / p).exists() for p, _ in overall_charts):
+            html_parts.append("<h2>Overall Results (All Models)</h2>")
+            html_parts.append(
+                "<p class='caption'>Averaged across all models/datasets in this run folder.</p>"
+            )
+            for p, alt in overall_charts:
+                if (self.output_dir / p).exists():
+                    html_parts.append(f"<img src='{p}' alt='{alt}'>")
 
         # Per-model sections
         if summary_df is not None and len(summary_df) > 0:
@@ -479,6 +580,14 @@ class Reporter:
                         f"alt='Per-detector scores for {model_name}'>"
                     )
 
+                # Latency chart
+                latency_chart = f"{safe_name}_latency.png"
+                if (self.output_dir / latency_chart).exists():
+                    html_parts.append(
+                        f"<img src='{latency_chart}' "
+                        f"alt='Latency per reducer for {model_name}'>"
+                    )
+
                 # Per-model summary table
                 model_summary = summary_df[summary_df["model"] == model_name]
                 score_cols = [c for c in DETECTOR_LABELS if c in model_summary.columns]
@@ -506,3 +615,108 @@ class Reporter:
         with open(path, "w") as f:
             f.write("\n".join(html_parts))
         logger.info(f"  Saved: {path}")
+
+    def save_docx_report(
+        self,
+        summary_df: pd.DataFrame,
+        reduction_df: Optional[pd.DataFrame] = None,
+        results_df: Optional[pd.DataFrame] = None,
+        filename: str = "report.docx",
+    ):
+        """Save a Word (.docx) report with tables and embedded PNG charts.
+
+        This is intended for sharing (one file containing tables + figures).
+        Requires the optional dependency: python-docx.
+        """
+        try:
+            from docx import Document
+            from docx.shared import Inches
+        except Exception as e:
+            logger.error(
+                "python-docx is required for DOCX export. "
+                "Install it with: pip install python-docx\n"
+                f"Import error: {e}"
+            )
+            return
+
+        def _safe(name: str) -> str:
+            return name.replace(":", "_").replace("/", "_").replace(" ", "_")
+
+        def _add_picture(doc: Document, rel_path: str, caption: Optional[str] = None):
+            p = self.output_dir / rel_path
+            if not p.exists():
+                return
+            if caption:
+                doc.add_paragraph(caption)
+            # 6.5" fits comfortably on US Letter with default margins
+            doc.add_picture(str(p), width=Inches(6.5))
+
+        def _add_df_table(doc: Document, df: pd.DataFrame):
+            if df is None or len(df) == 0:
+                doc.add_paragraph("(no data)")
+                return
+
+            display_df = df.copy()
+            for col in display_df.columns:
+                if np.issubdtype(display_df[col].dtype, np.number):
+                    display_df[col] = display_df[col].round(4)
+            display_df = display_df.replace({np.nan: ""})
+
+            table = doc.add_table(rows=1, cols=len(display_df.columns))
+            table.style = "Table Grid"
+
+            # Header row
+            hdr_cells = table.rows[0].cells
+            for i, col in enumerate(display_df.columns):
+                hdr_cells[i].text = str(col)
+                if hdr_cells[i].paragraphs and hdr_cells[i].paragraphs[0].runs:
+                    hdr_cells[i].paragraphs[0].runs[0].bold = True
+
+            # Data rows
+            for _, row in display_df.iterrows():
+                cells = table.add_row().cells
+                for i, col in enumerate(display_df.columns):
+                    val = row[col]
+                    cells[i].text = "" if val is None else str(val)
+
+        doc = Document()
+        doc.add_heading("Hallucination Reduction Experiment Report", level=0)
+        doc.add_paragraph(
+            "This report includes tables and figures generated by the benchmark. "
+            "Lower detector scores mean less hallucination."
+        )
+
+        # Overall charts
+        overall_charts = [
+            ("overall_hallucination_scores.png", "Overall hallucination scores"),
+            ("overall_per_detector.png", "Overall per-detector scores"),
+            ("overall_score_reductions.png", "Overall score reductions vs baseline"),
+            ("overall_latency.png", "Overall latency"),
+        ]
+        if any((self.output_dir / p).exists() for p, _ in overall_charts):
+            doc.add_heading("Overall Results (All Models)", level=1)
+            for rel, caption in overall_charts:
+                _add_picture(doc, rel, caption)
+
+        # Per-model sections
+        if summary_df is not None and len(summary_df) > 0 and "model" in summary_df.columns:
+            doc.add_heading("Per-Model Results", level=1)
+            for model_name in summary_df["model"].unique():
+                safe = _safe(str(model_name))
+                doc.add_heading(f"Model: {model_name}", level=2)
+                _add_picture(doc, f"{safe}_hallucination_scores.png")
+                _add_picture(doc, f"{safe}_per_detector.png")
+                _add_picture(doc, f"{safe}_score_reductions.png")
+                _add_picture(doc, f"{safe}_latency.png")
+
+        # Tables
+        doc.add_heading("Summary Table (Mean Scores)", level=1)
+        _add_df_table(doc, summary_df)
+
+        if reduction_df is not None and len(reduction_df) > 0:
+            doc.add_heading("Reductions vs Baseline", level=1)
+            _add_df_table(doc, reduction_df)
+
+        out_path = self.output_dir / filename
+        doc.save(str(out_path))
+        logger.info(f"  Saved: {out_path}")

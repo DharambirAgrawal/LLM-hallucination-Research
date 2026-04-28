@@ -117,13 +117,17 @@ class Evaluator:
             logger.warning("Cannot compute reducer comparison: missing baseline or reducer rows.")
             return pd.DataFrame()
 
-        # Index baseline rows by (model, sample_id) for easy lookup
-        baseline_lookup = baseline_df.set_index(["model", "sample_id"])
+        # Index baseline rows by (model, dataset, sample_id) for easy lookup.
+        # Using dataset avoids collisions when multiple datasets are present.
+        baseline_df = baseline_df.drop_duplicates(
+            subset=["model", "dataset", "sample_id"], keep="first"
+        )
+        baseline_lookup = baseline_df.set_index(["model", "dataset", "sample_id"])
 
         # For each reducer row, subtract the corresponding baseline score
         rows = []
         for _, r in reducer_df.iterrows():
-            key = (r["model"], r["sample_id"])
+            key = (r["model"], r.get("dataset"), r["sample_id"])
             if key not in baseline_lookup.index:
                 continue
             b = baseline_lookup.loc[key]
