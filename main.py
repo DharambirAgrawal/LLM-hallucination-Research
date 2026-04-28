@@ -483,9 +483,9 @@ def main():
     ]
 
     agg: dict[str, str] = {c: "mean" for c in numeric_cols}
-    for c in ["question", "right_answer"]:
-        if c in combined_all.columns:
-            agg[c] = "first"
+    for text_col in ["question", "right_answer"]:
+        if text_col in combined_all.columns:
+            agg[text_col] = "first"
 
     combined_mean = (
         combined_all.groupby(group_cols, dropna=False)
@@ -653,13 +653,14 @@ def main():
         f.write("\n".join(takeaways_lines))
 
     # Final console message
-    c.print(f"\n[bold green]✓ Experiment complete![/bold green]")
-    c.print(f"  📁 Output root:    [cyan]{base_out}[/cyan]")
-    c.print(f"  📁 Per-run folders:[cyan] {base_out}/run_XX/[/cyan]")
-    c.print(f"  📁 Combined avg:   [cyan]{combined_out}[/cyan]")
-    c.print(f"  📄 Combined report:[cyan]{combined_out / 'report.html'}[/cyan]")
+    final_console = Console()
+    final_console.print(f"\n[bold green]✓ Experiment complete![/bold green]")
+    final_console.print(f"  📁 Output root:    [cyan]{base_out}[/cyan]")
+    final_console.print(f"  📁 Per-run folders:[cyan] {base_out}/run_XX/[/cyan]")
+    final_console.print(f"  📁 Combined avg:   [cyan]{combined_out}[/cyan]")
+    final_console.print(f"  📄 Combined report:[cyan]{combined_out / 'report.html'}[/cyan]")
     if n_runs > 1:
-        c.print(f"  📈 Consistency:    [cyan]{combined_out / 'consistency_std.csv'}[/cyan]")
+        final_console.print(f"  📈 Consistency:    [cyan]{combined_out / 'consistency_std.csv'}[/cyan]")
 
 
 if __name__ == "__main__":

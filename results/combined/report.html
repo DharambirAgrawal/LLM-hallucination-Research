@@ -1,0 +1,140 @@
+<!DOCTYPE html><html><head>
+<meta charset='utf-8'>
+<title>Hallucination Reduction Experiment Report</title>
+<style>
+body { font-family: -apple-system, Arial, sans-serif; max-width: 1200px; margin: 2em auto; padding: 0 1em; color: #333; }
+h1 { border-bottom: 3px solid #3498DB; padding-bottom: 10px; }
+h2 { color: #2C3E50; margin-top: 2em; }
+h3 { color: #7F8C8D; }
+table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+th { background: #3498DB; color: white; padding: 8px 12px; text-align: left; }
+td { padding: 6px 12px; border-bottom: 1px solid #ddd; }
+tr:nth-child(even) { background: #f9f9f9; }
+img { max-width: 100%; margin: 1em 0; border: 1px solid #ddd; border-radius: 4px; }
+.caption { color: #666; font-size: 0.9em; margin: 0.5em 0; }
+.model-section { border: 1px solid #ddd; border-radius: 8px; padding: 1em; margin: 2em 0; }
+</style></head><body>
+<h1>Hallucination Reduction Experiment Report</h1>
+<p class='caption'>Testing how RAG, Constrained Decoding, and Self-Verification reduce LLM hallucination scores, measured by 4 detectors (Token, Semantic, BERT, LLM Judge).</p>
+<h2>Overall Results (All Models)</h2>
+<p class='caption'>Averaged across all models/datasets in this run folder.</p>
+<img src='overall_hallucination_scores.png' alt='Overall hallucination scores'>
+<img src='overall_score_reductions.png' alt='Overall score reductions'>
+<img src='overall_latency.png' alt='Overall latency'>
+<img src='overall_per_detector.png' alt='Overall per-detector scores'>
+<h2>Per-Model Results</h2>
+<div class='model-section'>
+<h3>Model: llama3:latest</h3>
+<img src='llama3_latest_hallucination_scores.png' alt='Hallucination scores for llama3:latest'>
+<img src='llama3_latest_score_reductions.png' alt='Score reductions for llama3:latest'>
+<img src='llama3_latest_per_detector.png' alt='Per-detector scores for llama3:latest'>
+<img src='llama3_latest_latency.png' alt='Latency per reducer for llama3:latest'>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th>reducer</th>
+      <th>dataset</th>
+      <th>token_score</th>
+      <th>semantic_score</th>
+      <th>bert_score</th>
+      <th>llm_score</th>
+      <th>n_samples</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>baseline</td>
+      <td>synthetic</td>
+      <td>0.666</td>
+      <td>0.111</td>
+      <td>0.602</td>
+      <td>0.027</td>
+      <td>5</td>
+    </tr>
+    <tr>
+      <td>constrained_decoding</td>
+      <td>synthetic</td>
+      <td>0.699</td>
+      <td>0.109</td>
+      <td>0.663</td>
+      <td>0.030</td>
+      <td>5</td>
+    </tr>
+    <tr>
+      <td>rag</td>
+      <td>synthetic</td>
+      <td>0.450</td>
+      <td>0.073</td>
+      <td>0.519</td>
+      <td>0.033</td>
+      <td>5</td>
+    </tr>
+    <tr>
+      <td>self_verification</td>
+      <td>synthetic</td>
+      <td>0.681</td>
+      <td>0.104</td>
+      <td>0.629</td>
+      <td>0.093</td>
+      <td>5</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+<h2>Score Reductions vs Baseline (All Models)</h2>
+<p class='caption'>Positive = reducer lowered hallucination score. Higher = better.</p>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th>model</th>
+      <th>reducer</th>
+      <th>token_score_reduction</th>
+      <th>semantic_score_reduction</th>
+      <th>bert_score_reduction</th>
+      <th>llm_score_reduction</th>
+      <th>token_score_win_rate</th>
+      <th>semantic_score_win_rate</th>
+      <th>bert_score_win_rate</th>
+      <th>llm_score_win_rate</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>llama3:latest</td>
+      <td>constrained_decoding</td>
+      <td>-0.033</td>
+      <td>0.002</td>
+      <td>-0.062</td>
+      <td>-0.003</td>
+      <td>0.600</td>
+      <td>0.400</td>
+      <td>0.600</td>
+      <td>0.400</td>
+    </tr>
+    <tr>
+      <td>llama3:latest</td>
+      <td>rag</td>
+      <td>0.215</td>
+      <td>0.038</td>
+      <td>0.083</td>
+      <td>-0.007</td>
+      <td>0.800</td>
+      <td>0.600</td>
+      <td>1.000</td>
+      <td>0.400</td>
+    </tr>
+    <tr>
+      <td>llama3:latest</td>
+      <td>self_verification</td>
+      <td>-0.015</td>
+      <td>0.007</td>
+      <td>-0.028</td>
+      <td>-0.067</td>
+      <td>0.400</td>
+      <td>0.400</td>
+      <td>0.200</td>
+      <td>0.200</td>
+    </tr>
+  </tbody>
+</table>
+</body></html>

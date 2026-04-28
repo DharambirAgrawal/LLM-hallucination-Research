@@ -1,0 +1,102 @@
+{
+  "summary": [
+    {
+      "model": "llama3:latest",
+      "dataset": "synthetic",
+      "reducer": "baseline",
+      "token_score": 0.6433,
+      "semantic_score": 0.1013,
+      "bert_score": 0.5937,
+      "llm_score": 0.02,
+      "token_accuracy": 0.4,
+      "semantic_accuracy": 1.0,
+      "bert_accuracy": 0.2,
+      "llm_accuracy": 1.0,
+      "n_samples": 5,
+      "mean_latency_s": 1.956
+    },
+    {
+      "model": "llama3:latest",
+      "dataset": "synthetic",
+      "reducer": "constrained_decoding",
+      "token_score": 0.6989,
+      "semantic_score": 0.1094,
+      "bert_score": 0.669,
+      "llm_score": 0.03,
+      "token_accuracy": 0.2,
+      "semantic_accuracy": 1.0,
+      "bert_accuracy": 0.0,
+      "llm_accuracy": 1.0,
+      "n_samples": 5,
+      "mean_latency_s": 1.43
+    },
+    {
+      "model": "llama3:latest",
+      "dataset": "synthetic",
+      "reducer": "rag",
+      "token_score": 0.4583,
+      "semantic_score": 0.0762,
+      "bert_score": 0.528,
+      "llm_score": 0.03,
+      "token_accuracy": 0.6,
+      "semantic_accuracy": 1.0,
+      "bert_accuracy": 0.2,
+      "llm_accuracy": 1.0,
+      "n_samples": 5,
+      "mean_latency_s": 1.024
+    },
+    {
+      "model": "llama3:latest",
+      "dataset": "synthetic",
+      "reducer": "self_verification",
+      "token_score": 0.7157,
+      "semantic_score": 0.1147,
+      "bert_score": 0.6293,
+      "llm_score": 0.03,
+      "token_accuracy": 0.2,
+      "semantic_accuracy": 1.0,
+      "bert_accuracy": 0.0,
+      "llm_accuracy": 1.0,
+      "n_samples": 5,
+      "mean_latency_s": 3.77
+    }
+  ],
+  "reductions": [
+    {
+      "model": "llama3:latest",
+      "reducer": "constrained_decoding",
+      "token_score_reduction": -0.0556,
+      "semantic_score_reduction": -0.0081,
+      "bert_score_reduction": -0.0754,
+      "llm_score_reduction": -0.01,
+      "token_score_win_rate": 0.4,
+      "semantic_score_win_rate": 0.2,
+      "bert_score_win_rate": 0.4,
+      "llm_score_win_rate": 0.0
+    },
+    {
+      "model": "llama3:latest",
+      "reducer": "rag",
+      "token_score_reduction": 0.1851,
+      "semantic_score_reduction": 0.0251,
+      "bert_score_reduction": 0.0656,
+      "llm_score_reduction": -0.01,
+      "token_score_win_rate": 0.8,
+      "semantic_score_win_rate": 0.2,
+      "bert_score_win_rate": 0.8,
+      "llm_score_win_rate": 0.2
+    },
+    {
+      "model": "llama3:latest",
+      "reducer": "self_verification",
+      "token_score_reduction": -0.0724,
+      "semantic_score_reduction": -0.0134,
+      "bert_score_reduction": -0.0357,
+      "llm_score_reduction": -0.01,
+      "token_score_win_rate": 0.4,
+      "semantic_score_win_rate": 0.2,
+      "bert_score_win_rate": 0.6,
+      "llm_score_win_rate": 0.0
+    }
+  ]
+}

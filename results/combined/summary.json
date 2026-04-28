@@ -1,0 +1,86 @@
+{
+  "summary": [
+    {
+      "model": "llama3:latest",
+      "dataset": "synthetic",
+      "reducer": "baseline",
+      "token_score": 0.6656,
+      "semantic_score": 0.1112,
+      "bert_score": 0.6015,
+      "llm_score": 0.0267,
+      "n_samples": 5,
+      "mean_latency_s": 1.485
+    },
+    {
+      "model": "llama3:latest",
+      "dataset": "synthetic",
+      "reducer": "constrained_decoding",
+      "token_score": 0.6989,
+      "semantic_score": 0.1094,
+      "bert_score": 0.6631,
+      "llm_score": 0.03,
+      "n_samples": 5,
+      "mean_latency_s": 1.527
+    },
+    {
+      "model": "llama3:latest",
+      "dataset": "synthetic",
+      "reducer": "rag",
+      "token_score": 0.4502,
+      "semantic_score": 0.0734,
+      "bert_score": 0.5189,
+      "llm_score": 0.0333,
+      "n_samples": 5,
+      "mean_latency_s": 1.074
+    },
+    {
+      "model": "llama3:latest",
+      "dataset": "synthetic",
+      "reducer": "self_verification",
+      "token_score": 0.6808,
+      "semantic_score": 0.1045,
+      "bert_score": 0.6294,
+      "llm_score": 0.0933,
+      "n_samples": 5,
+      "mean_latency_s": 3.848
+    }
+  ],
+  "reductions": [
+    {
+      "model": "llama3:latest",
+      "reducer": "constrained_decoding",
+      "token_score_reduction": -0.0333,
+      "semantic_score_reduction": 0.0018,
+      "bert_score_reduction": -0.0616,
+      "llm_score_reduction": -0.0033,
+      "token_score_win_rate": 0.6,
+      "semantic_score_win_rate": 0.4,
+      "bert_score_win_rate": 0.6,
+      "llm_score_win_rate": 0.4
+    },
+    {
+      "model": "llama3:latest",
+      "reducer": "rag",
+      "token_score_reduction": 0.2154,
+      "semantic_score_reduction": 0.0378,
+      "bert_score_reduction": 0.0826,
+      "llm_score_reduction": -0.0067,
+      "token_score_win_rate": 0.8,
+      "semantic_score_win_rate": 0.6,
+      "bert_score_win_rate": 1.0,
+      "llm_score_win_rate": 0.4
+    },
+    {
+      "model": "llama3:latest",
+      "reducer": "self_verification",
+      "token_score_reduction": -0.0152,
+      "semantic_score_reduction": 0.0067,
+      "bert_score_reduction": -0.028,
+      "llm_score_reduction": -0.0667,
+      "token_score_win_rate": 0.4,
+      "semantic_score_win_rate": 0.4,
+      "bert_score_win_rate": 0.2,
+      "llm_score_win_rate": 0.2
+    }
+  ]
+}

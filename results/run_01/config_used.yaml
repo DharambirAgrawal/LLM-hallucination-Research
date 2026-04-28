@@ -1,0 +1,69 @@
+ollama:
+  host: http://localhost:11434
+  timeout: 120
+models:
+- name: llama3:latest
+  model: llama3:latest
+  family: meta
+  auto_pull: false
+- name: gemma4:e4b
+  model: gemma4:e4b
+  family: google
+  auto_pull: false
+- name: qwen2.5:latest
+  model: qwen2.5:latest
+  family: qwen
+  auto_pull: false
+- name: deepseek-r1-7b:latest
+  model: deepseek-r1-7b:latest
+  family: deepseek
+  auto_pull: false
+- name: gpt-oss:latest
+  model: gpt-oss:latest
+  family: openai
+  auto_pull: false
+selected_models:
+- llama3:latest
+datasets:
+- name: synthetic
+  source: synthetic
+  max_samples: 5
+detectors:
+  llm_based:
+    enabled: true
+    threshold: 0.5
+  semantic_similarity:
+    enabled: true
+    threshold: 0.35
+    embedding_model: sentence-transformers/all-MiniLM-L6-v2
+  bert_stochastic:
+    enabled: true
+    threshold: 0.75
+    n_samples: 5
+    temperature: 1.0
+  token_similarity:
+    enabled: true
+    bleu_threshold: 0.25
+    intersection_threshold: 0.35
+    rouge_threshold: 0.3
+reducers:
+  baseline:
+    enabled: true
+  rag:
+    enabled: true
+  constrained_decoding:
+    enabled: true
+    temperature: 0.1
+    top_p: 0.3
+    top_k: 5
+  self_verification:
+    enabled: true
+benchmark:
+  output_dir: results/run_01
+  save_intermediate: true
+  seed: 42
+  request_timeout: 120
+logging:
+  level: INFO
+  save_logs: true
+  log_file: results/run_01/benchmark.log

@@ -1,0 +1,21 @@
+model,dataset,sample_id,reducer,latency_s,token_score,semantic_score,llm_score,bert_score,question,right_answer
+llama3:latest,synthetic,synthetic_0000,baseline,1.3167,0.7761,0.1877,0.0167,1.0387,When was Python first released?,Python was first released in 1991.
+llama3:latest,synthetic,synthetic_0000,constrained_decoding,1.0627,0.732,0.1454,0.0,1.0358,When was Python first released?,Python was first released in 1991.
+llama3:latest,synthetic,synthetic_0000,rag,0.8343,0.3417,0.0373,0.05,0.9355,When was Python first released?,Python was first released in 1991.
+llama3:latest,synthetic,synthetic_0000,self_verification,3.2153,0.7485,0.1462,0.0167,1.0141,When was Python first released?,Python was first released in 1991.
+llama3:latest,synthetic,synthetic_0001,baseline,1.4593,0.6623,0.0591,0.0167,0.6438,Who built the first unified Great Wall of China?,"The first unified Great Wall was built by Qin Shi Huang, the first emperor of China."
+llama3:latest,synthetic,synthetic_0001,constrained_decoding,2.5707,0.8287,0.0921,0.0,0.7742,Who built the first unified Great Wall of China?,"The first unified Great Wall was built by Qin Shi Huang, the first emperor of China."
+llama3:latest,synthetic,synthetic_0001,rag,1.6517,0.7237,0.0849,0.0,0.6335,Who built the first unified Great Wall of China?,"The first unified Great Wall was built by Qin Shi Huang, the first emperor of China."
+llama3:latest,synthetic,synthetic_0001,self_verification,4.573,0.796,0.0748,0.0,0.7106,Who built the first unified Great Wall of China?,"The first unified Great Wall was built by Qin Shi Huang, the first emperor of China."
+llama3:latest,synthetic,synthetic_0002,baseline,0.8953,0.7334,0.119,0.05,0.5442,What is the main pigment involved in photosynthesis?,Chlorophyll is the primary pigment that absorbs light in photosynthesis.
+llama3:latest,synthetic,synthetic_0002,constrained_decoding,0.6997,0.6788,0.125,0.05,0.4916,What is the main pigment involved in photosynthesis?,Chlorophyll is the primary pigment that absorbs light in photosynthesis.
+llama3:latest,synthetic,synthetic_0002,rag,0.8637,0.7167,0.1019,0.05,0.5383,What is the main pigment involved in photosynthesis?,Chlorophyll is the primary pigment that absorbs light in photosynthesis.
+llama3:latest,synthetic,synthetic_0002,self_verification,3.699,0.7412,0.1203,0.05,0.5667,What is the main pigment involved in photosynthesis?,Chlorophyll is the primary pigment that absorbs light in photosynthesis.
+llama3:latest,synthetic,synthetic_0003,baseline,2.3433,0.4888,0.0854,0.0333,0.274,For what did Einstein receive the Nobel Prize?,Einstein received the Nobel Prize in Physics in 1921 for his discovery of the law of the photoelectric effect.
+llama3:latest,synthetic,synthetic_0003,constrained_decoding,1.1497,0.4529,0.0782,0.05,0.259,For what did Einstein receive the Nobel Prize?,Einstein received the Nobel Prize in Physics in 1921 for his discovery of the law of the photoelectric effect.
+llama3:latest,synthetic,synthetic_0003,rag,1.2567,0.2379,0.087,0.0167,0.2252,For what did Einstein receive the Nobel Prize?,Einstein received the Nobel Prize in Physics in 1921 for his discovery of the law of the photoelectric effect.
+llama3:latest,synthetic,synthetic_0003,self_verification,3.7,0.5141,0.0903,0.35,0.3061,For what did Einstein receive the Nobel Prize?,Einstein received the Nobel Prize in Physics in 1921 for his discovery of the law of the photoelectric effect.
+llama3:latest,synthetic,synthetic_0004,baseline,1.4103,0.6676,0.1047,0.0167,0.5067,How many neurons does the human brain contain?,The human brain contains approximately 86 billion neurons.
+llama3:latest,synthetic,synthetic_0004,constrained_decoding,2.15,0.8021,0.1064,0.05,0.7549,How many neurons does the human brain contain?,The human brain contains approximately 86 billion neurons.
+llama3:latest,synthetic,synthetic_0004,rag,0.7617,0.2311,0.0558,0.05,0.2618,How many neurons does the human brain contain?,The human brain contains approximately 86 billion neurons.
+llama3:latest,synthetic,synthetic_0004,self_verification,4.0507,0.6044,0.0909,0.05,0.5497,How many neurons does the human brain contain?,The human brain contains approximately 86 billion neurons.

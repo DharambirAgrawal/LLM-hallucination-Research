@@ -1,0 +1,5 @@
+model,dataset,reducer,token_score,semantic_score,bert_score,llm_score,n_samples,mean_latency_s
+llama3:latest,synthetic,baseline,0.6656,0.1112,0.6015,0.0267,5,1.485
+llama3:latest,synthetic,constrained_decoding,0.6989,0.1094,0.6631,0.03,5,1.527
+llama3:latest,synthetic,rag,0.4502,0.0734,0.5189,0.0333,5,1.074
+llama3:latest,synthetic,self_verification,0.6808,0.1045,0.6294,0.0933,5,3.848

@@ -1,0 +1,4 @@
+model,reducer,token_score_reduction,semantic_score_reduction,bert_score_reduction,llm_score_reduction,token_score_win_rate,semantic_score_win_rate,bert_score_win_rate,llm_score_win_rate
+llama3:latest,constrained_decoding,-0.0556,-0.0081,-0.0754,-0.01,0.4,0.2,0.4,0.0
+llama3:latest,rag,0.1851,0.0251,0.0656,-0.01,0.8,0.2,0.8,0.2
+llama3:latest,self_verification,-0.0724,-0.0134,-0.0357,-0.01,0.4,0.2,0.6,0.0
