@@ -125,8 +125,16 @@ python main.py --host http://192.168.1.10:11434
 
 # Check setup without running inference
 python main.py --dry-run
-```
 
+# Quick Test
+python main.py --models <name> --datasets synthetic --samples 5 --runs 1 --no-prompt --no-bert --no-llm --docx
+
+# Full Run (Without docx)
+python main.py --runs 5 --samples 50 --no-prompt
+
+# Full Run (With docx)
+python main.py --runs 5 --samples 50 --no-prompt --docx
+```
 ---
 
 ## 📐 Detection Methods
