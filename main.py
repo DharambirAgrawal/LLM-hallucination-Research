@@ -388,7 +388,6 @@ def main():
         sys.exit(1)
  
     # Print what we're about to run
-    from rich.console import Console
     from rich.table import Table
     from rich import box
     c = Console()
