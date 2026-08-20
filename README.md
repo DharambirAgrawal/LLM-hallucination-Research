@@ -5,8 +5,8 @@
 ![Local](https://img.shields.io/badge/runs-100%25%20local-brightgreen)
 
 A local benchmarking harness that scores LLM hallucinations with four detection
-methods, then measures whether three common mitigation strategies — RAG,
-constrained decoding, and self-verification — actually reduce them.
+methods, then measures whether three common mitigation strategies (RAG,
+constrained decoding, and self-verification) actually reduce them.
 
 Everything runs against a local [Ollama](https://ollama.com) server, so any
 installed model can be benchmarked with no API keys and no cloud GPU.
@@ -15,8 +15,9 @@ installed model can be benchmarked with no API keys and no cloud GPU.
 
 Hallucination detection and hallucination *reduction* are usually discussed
 separately: papers benchmark detectors, and blog posts recommend mitigation
-techniques, rarely with a shared, reproducible measurement loop connecting
-the two. This project builds that loop end-to-end for locally-hosted models:
+techniques, but rarely with a shared, reproducible measurement loop
+connecting the two. This project builds that loop end-to-end for
+locally-hosted models:
 
 1. Generate a baseline answer with no mitigation.
 2. Score it with four independent hallucination detectors.
@@ -82,7 +83,7 @@ The repository includes a completed benchmark run (`results/`) evaluating
 **`llama3:latest`** on the synthetic QA dataset, 5 samples per condition,
 averaged over 3 repeated runs for consistency
 (`results/combined/summary.csv`, `reductions.csv`, `takeaways.md`). These are
-the actual numbers produced by the harness — no figures below are invented.
+the actual numbers produced by the harness: no figures below are invented.
 
 **Mean scores by reducer (lower = less hallucination):**
 
@@ -100,12 +101,12 @@ the actual numbers produced by the harness — no figures below are invented.
   and was the fastest condition (grounding in a reference passage apparently
   shortens generation).
 - **Constrained decoding and self-verification did not reduce hallucination
-  scores on this model/dataset** — both moved token and BERT scores in the
+  scores on this model/dataset.** Both moved token and BERT scores in the
   wrong direction versus baseline.
 - **Self-verification's LLM-judge score got worse** (0.093 vs. 0.027
   baseline) and it was **~2.6x slower** than baseline due to its two-pass
-  generation, with no measured benefit — the harness surfaces this
-  cost/benefit trade-off directly rather than assuming self-critique helps.
+  generation, with no measured benefit. The harness surfaces this
+  cost/benefit trade-off directly, rather than assuming self-critique helps.
 - Ranked by mean score reduction across all four detectors, **RAG is the
   best-performing reducer for `llama3:latest`** in this run
   (`results/combined/takeaways.md`).
@@ -118,7 +119,7 @@ sample counts, and the full HaluEval dataset via `config.yaml`.
 
 ## Tech Stack
 
-- **Inference:** [Ollama](https://ollama.com) (local model serving — Llama 3,
+- **Inference:** [Ollama](https://ollama.com) (local model serving: Llama 3,
   Qwen, Gemma, DeepSeek, GPT-OSS, or any pulled tag)
 - **NLP metrics:** `sentence-transformers`, `bert-score`, `rouge-score`,
   `nltk`, `scikit-learn`
@@ -130,7 +131,7 @@ sample counts, and the full HaluEval dataset via `config.yaml`.
 
 ```
 LLM-hallucination-Research/
-├── main.py                  # Entry point — runs the full experiment
+├── main.py                  # Entry point, runs the full experiment
 ├── quick_demo.py            # Offline smoke-test (no Ollama required)
 ├── config.yaml              # Models, datasets, detectors, reducers
 ├── requirements.txt
@@ -152,18 +153,18 @@ LLM-hallucination-Research/
 │
 ├── reducers/
 │   ├── base_reducer.py      # Abstract reducer interface
-│   ├── rag.py                # Retrieval-augmented generation
+│   ├── rag.py               # Retrieval-augmented generation
 │   ├── constrained_decoding.py
 │   └── self_verification.py
 │
 ├── benchmark/
-│   ├── runner.py             # Orchestrates baseline → reducers → detectors
-│   ├── evaluator.py          # Score reductions, win rates, comparisons
-│   └── reporter.py           # Console tables + charts + HTML/DOCX reports
+│   ├── runner.py            # Orchestrates baseline → reducers → detectors
+│   ├── evaluator.py         # Score reductions, win rates, comparisons
+│   └── reporter.py          # Console tables + charts + HTML/DOCX reports
 │
 └── results/                 # Output of a completed benchmark run
-    ├── run_01/ … run_03/     # Per-run raw scores, charts, reports
-    └── combined/              # Averaged across runs + takeaways.md
+    ├── run_01/ … run_03/    # Per-run raw scores, charts, reports
+    └── combined/            # Averaged across runs + takeaways.md
 ```
 
 ## Getting Started
@@ -187,7 +188,7 @@ Reports are written to `results/run_01/report.html` (per-run) and
 alongside each report.
 
 To sanity-check the install without an Ollama server, run
-`python quick_demo.py` — it exercises the token and semantic detectors on
+`python quick_demo.py`, which exercises the token and semantic detectors on
 synthetic data only.
 
 ### Reproducing the reported results
@@ -230,6 +231,6 @@ models:
 
 ## Contributors
 
-- Dr. Bharat Rawal — Grambling State University, Department of Computer
+- Dr. Bharat Rawal, Grambling State University, Department of Computer
   Science and Digital Technologies
-- QASC — Quantum-Enhanced AI and Secure Computing
+- QASC (Quantum-Enhanced AI and Secure Computing)
