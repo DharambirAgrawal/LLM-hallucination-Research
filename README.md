@@ -4,9 +4,12 @@
 ![Ollama](https://img.shields.io/badge/inference-Ollama-000000)
 ![Local](https://img.shields.io/badge/runs-100%25%20local-brightgreen)
 
-A local benchmarking harness that scores LLM hallucinations with four detection
-methods, then measures whether three common mitigation strategies — RAG,
-constrained decoding, and self-verification — actually reduce them.
+A local benchmarking harness that scores LLM hallucinations with four baseline
+signals, then measures whether mitigation strategies reduce them. The repository
+currently contains local reimplementations of the baselines; it does not claim
+that the current reducer files are upstream implementations. See
+[METHOD_SOURCES.md](METHOD_SOURCES.md) for the papers, repositories, licenses,
+and exact differences.
 
 Everything runs against a local [Ollama](https://ollama.com) server, so any
 installed model can be benchmarked with no API keys and no cloud GPU.
@@ -26,16 +29,21 @@ the two. This project builds that loop end-to-end for locally-hosted models:
 5. Compare: does the reduction strategy actually lower the hallucination
    score, and at what latency cost?
 
-The detection methods are based on the techniques and precision/recall
+Some detector choices are motivated by the techniques and precision/recall
 trade-offs described in the AWS Machine Learning blog post
 ["Detect hallucinations for RAG-based systems" (2025)](https://aws.amazon.com/blogs/machine-learning/detect-hallucinations-for-rag-based-systems/).
+The AWS post is background material, not the source code for this repository's
+detectors.
 
 ## Methodology
 
 ### Detectors
 
-Each detector scores a generated answer against the dataset's correct answer
-on a 0 (factual) → 1 (hallucinated) scale.
+Each detector produces a heuristic signal comparing a generated answer with a
+reference answer or context. A high score is treated as more suspicious, but no
+single local detector is ground truth. Published entailment detectors such as
+AlignScore and SummaC are documented as future reference implementations in
+[METHOD_SOURCES.md](METHOD_SOURCES.md).
 
 | Detector | Signal | Cost |
 |---|---|---|
@@ -51,9 +59,14 @@ four (default weights: LLM 0.40, BERT 0.35, semantic 0.15, token 0.10).
 
 | Reducer | Mechanism |
 |---|---|
-| **RAG** (`reducers/rag.py`) | Injects the dataset's reference passage into the prompt so the model grounds its answer instead of relying on parametric memory |
-| **Constrained decoding** (`reducers/constrained_decoding.py`) | Tightens sampling (temperature 0.7→0.1, top_p 1.0→0.3, top_k 40→5) to force high-confidence token choices |
-| **Self-verification** (`reducers/self_verification.py`) | Two-pass generation: produce an answer, then prompt the model to critique and, if it flags itself wrong, correct that answer |
+| **Context-grounding baseline** (`reducers/rag.py`) | Injects the dataset's reference passage into the prompt. This is not a live retriever yet. |
+| **Restricted-sampling baseline** (`reducers/constrained_decoding.py`) | Tightens temperature, top-p, and top-k. This is not formal grammar-constrained decoding. |
+| **Self-Refine adapter** (`reducers/self_refine.py`) | Published generate-feedback-revise loop connected to the supplied Ollama model. |
+
+The legacy local implementations are useful baselines, but they must not be reported
+as reproductions of the published methods until the upstream algorithms are
+integrated and their versions are recorded. The planned upstream comparison is
+documented in [METHOD_SOURCES.md](METHOD_SOURCES.md).
 
 ### Datasets
 
@@ -186,6 +199,12 @@ Reports are written to `results/run_01/report.html` (per-run) and
 `results/combined/report.html` (averaged across runs), with PNG charts saved
 alongside each report.
 
+The optional SummaC adapter uses the upstream `summac` package and requires a
+compatible PyTorch/Transformers environment. It is disabled by default in the
+Ollama container because the available Python 3.14 runtime is not compatible
+with the upstream model. Enable `detectors.summac` only after validating it in a
+Python 3.10-3.12 environment.
+
 To sanity-check the install without an Ollama server, run
 `python quick_demo.py` — it exercises the token and semantic detectors on
 synthetic data only.
@@ -221,11 +240,20 @@ models:
     auto_pull: false
 ```
 
-## References
+## Method Sources and References
+
+The complete source register is [METHOD_SOURCES.md](METHOD_SOURCES.md). It
+records publication links, upstream repositories, licenses, runtime limitations,
+and local deviations. In particular, the current code is a local reimplementation
+until an upstream adapter is added.
 
 - [AWS ML Blog: Detect hallucinations for RAG-based systems (2025)](https://aws.amazon.com/blogs/machine-learning/detect-hallucinations-for-rag-based-systems/)
 - [HaluEval benchmark (Li et al., 2023)](https://arxiv.org/abs/2305.11747)
 - [BERTScore (Zhang et al., 2019)](https://arxiv.org/abs/1904.09675)
+- [RAG (Lewis et al., 2020)](https://arxiv.org/abs/2005.11401)
+- [Self-Refine (Madaan et al., 2023)](https://arxiv.org/abs/2303.17651)
+- [AlignScore (Zha et al., 2023)](https://arxiv.org/abs/2305.07035)
+- [SummaC (Laban et al., 2022)](https://arxiv.org/abs/2111.09525)
 - [Ollama model library](https://ollama.com/library)
 
 ## Contributors

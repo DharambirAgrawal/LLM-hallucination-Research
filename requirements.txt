@@ -8,6 +8,10 @@ scikit-learn>=1.4.0
 # ── BERT Score ────────────────────────────────────────────────
 bert-score>=0.3.13
 
+# ── Published factuality detector ─────────────────────────────
+# SummaC: https://github.com/tingofurro/summac
+summac>=0.0.4
+
 # ── NLP metrics ───────────────────────────────────────────────
 evaluate>=0.4.1
 rouge-score>=0.1.2

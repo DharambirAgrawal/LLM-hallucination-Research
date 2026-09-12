@@ -1,12 +1,12 @@
 """
-Constrained Decoding Reducer
+Restricted-Sampling Baseline
 =============================
 Same question as baseline, but with tighter generation parameters.
 
-By lowering temperature, top_p, and top_k, we force the model to
-pick only its most confident, high-probability tokens. The goal
-is to prevent the model from getting creative with its answers,
-which often leads to hallucinations.
+Lowering temperature, top_p, and top_k narrows the sampling distribution. This
+is a restricted-sampling baseline; it does not implement formal grammar or
+token-level constrained decoding. See METHOD_SOURCES.md for compatible
+published constrained-generation libraries.
 
 Parameters (compared to default):
   - temperature: 0.7 -> 0.1  (much less random)
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 
 class ConstrainedDecodingReducer(BaseReducer):
-    """Asks the question with tight generation parameters to reduce randomness."""
+    """Asks the question with restricted sampling parameters."""
 
     # Default parameters - override via config.yaml
     DEFAULT_TEMPERATURE = 0.1

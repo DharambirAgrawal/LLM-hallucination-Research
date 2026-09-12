@@ -89,29 +89,54 @@ detectors:
     intersection_threshold: 0.35
     rouge_threshold: 0.30
 
+  # Published NLI-based factuality detector.
+  # Install with: pip install -r requirements.txt. It requires a compatible
+  # PyTorch/Transformers environment; keep disabled in the default Ollama
+  # container until that environment is prepared.
+  summac:
+    enabled: false
+    threshold: 0.5
+    device: "cpu"
+    # "zs" uses the official SummaC-ZS path; "vitc" selects SummaC-Conv.
+    model_name: "zs"
+
+  # Published AlignScore detector. Requires the upstream checkpoint path.
+  # See METHOD_SOURCES.md before enabling.
+  alignscore:
+    enabled: false
+    checkpoint_path: "models/AlignScore-base.ckpt"
+    threshold: 0.5
+    device: "cpu"
+    model_name: "roberta-base"
+
 reducers:
   # No reduction - just ask the question directly.
   # This gives us the baseline hallucination scores to compare against.
   baseline:
     enabled: true
  
-  # Retrieval-Augmented Generation
-  # Provides the reference passage alongside the question
+  # Context-grounding baseline, not a live retriever yet.
+  # See METHOD_SOURCES.md before describing this as a RAG reproduction.
   rag:
     enabled: true
  
-  # Constrained Decoding
-  # Uses tight generation parameters to force conservative outputs
+  # Restricted-sampling baseline using Ollama decoding parameters.
+  # This is not grammar-constrained decoding.
   constrained_decoding:
     enabled: true
     temperature: 0.1
     top_p: 0.3
     top_k: 5
  
-  # Self-Verification
-  # Generates answer, then asks model to verify it
+  # One-pass self-critique baseline. This is not the full Self-Refine method.
   self_verification:
+    enabled: false
+
+  # Published Self-Refine algorithm connected to Ollama through an adapter.
+  # Source: https://github.com/madaan/self-refine
+  self_refine:
     enabled: true
+    iterations: 1
  
   # ----- Phase 3: Novel method (to be implemented) -----
   # brier_calibration:

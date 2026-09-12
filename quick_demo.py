@@ -59,10 +59,17 @@ def main():
     from data.datasets import _make_synthetic
 
     samples = _make_synthetic(max_samples=30, seed=42)
-    y_true  = [s.is_hallucinated for s in samples]
+    examples = [
+        (s.context, s.question, s.right_answer, False)
+        for s in samples
+    ] + [
+        (s.context, s.question, s.hallucinated_answer, True)
+        for s in samples
+    ]
+    y_true = [is_hallucinated for _, _, _, is_hallucinated in examples]
     hal_n   = sum(y_true)
     fac_n   = len(y_true) - hal_n
-    c.print(f"  {len(samples)} samples  |  {hal_n} hallucinated  |  {fac_n} factual")
+    c.print(f"  {len(examples)} examples  |  {hal_n} hallucinated  |  {fac_n} factual")
 
     results = {}
 
@@ -71,7 +78,10 @@ def main():
     from detectors.token_detector import TokenSimilarityDetector
     t0  = time.time()
     det = TokenSimilarityDetector()
-    tok_preds = [det.detect(s.context, s.answer).is_hallucinated for s in samples]
+    tok_preds = [
+        det.detect(context, answer).is_hallucinated
+        for context, _, answer, _ in examples
+    ]
     elapsed   = time.time() - t0
     results["Token Similarity"] = metrics(y_true, tok_preds)
     c.print(f"  Done in {elapsed:.2f}s")
@@ -85,7 +95,10 @@ def main():
             embedding_model="sentence-transformers/all-MiniLM-L6-v2",
             device="cpu",
         )
-        rs      = det.detect_batch([s.context for s in samples], [s.answer for s in samples])
+        rs      = det.detect_batch(
+            [context for context, _, _, _ in examples],
+            [answer for _, _, answer, _ in examples],
+        )
         elapsed = time.time() - t0
         sem_preds = [r.is_hallucinated for r in rs]
         results["Semantic Similarity"] = metrics(y_true, sem_preds)
@@ -114,8 +127,8 @@ def main():
             t0       = time.time()
             llm_det  = LLMDetector(judge_model=model, threshold=0.5)
             llm_preds = [
-                llm_det.detect(s.context, s.answer).is_hallucinated
-                for s in samples
+                llm_det.detect(context, answer).is_hallucinated
+                for context, _, answer, _ in examples
             ]
             results[f"LLM-Based ({tag})"] = metrics(y_true, llm_preds)
             c.print(f"  LLM done in {time.time()-t0:.1f}s")
@@ -125,8 +138,8 @@ def main():
             t0        = time.time()
             bert_det  = BERTStochasticDetector(model=model, n_samples=3, use_fast_bert=True)
             bert_preds = [
-                bert_det.detect(s.question, s.context, s.answer).is_hallucinated
-                for s in samples
+                bert_det.detect(question, context, answer).is_hallucinated
+                for context, question, answer, _ in examples
             ]
             results[f"BERT Stochastic ({tag})"] = metrics(y_true, bert_preds)
             c.print(f"  BERT done in {time.time()-t0:.1f}s")

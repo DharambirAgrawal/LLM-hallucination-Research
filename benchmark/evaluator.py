@@ -23,8 +23,14 @@ from loguru import logger
 
 
 # Score columns the detectors produce
-SCORE_COLS = ["token_score", "semantic_score", "bert_score", "llm_score"]
-PRED_COLS  = ["token_pred",  "semantic_pred",  "bert_pred",  "llm_pred"]
+SCORE_COLS = [
+    "token_score", "semantic_score", "bert_score", "llm_score",
+    "summac_score", "alignscore_score",
+]
+PRED_COLS  = [
+    "token_pred", "semantic_pred", "bert_pred", "llm_pred",
+    "summac_pred", "alignscore_pred",
+]
 
 
 class Evaluator:

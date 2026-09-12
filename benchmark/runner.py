@@ -32,11 +32,14 @@ from detectors.llm_detector import LLMDetector
 from detectors.semantic_detector import SemanticSimilarityDetector
 from detectors.bert_detector import BERTStochasticDetector
 from detectors.token_detector import TokenSimilarityDetector
+from detectors.summac_detector import SummaCDetector
+from detectors.alignscore_detector import AlignScoreDetector
 from reducers import (
     BaseReducer,
     RAGReducer,
     ConstrainedDecodingReducer,
     SelfVerificationReducer,
+    SelfRefineReducer,
 )
 
 
@@ -59,6 +62,8 @@ class BenchmarkRunner:
         det_cfg = config.get("detectors", {})
         self._semantic_det = None
         self._token_det    = None
+        self._summac_det   = None
+        self._alignscore_det = None
 
         if det_cfg.get("semantic_similarity", {}).get("enabled", True):
             sem_cfg = det_cfg["semantic_similarity"]
@@ -74,6 +79,23 @@ class BenchmarkRunner:
                 bleu_threshold=tok_cfg.get("bleu_threshold", 0.25),
                 intersection_threshold=tok_cfg.get("intersection_threshold", 0.35),
                 rouge_threshold=tok_cfg.get("rouge_threshold", 0.30),
+            )
+
+        sum_cfg = det_cfg.get("summac", {})
+        if sum_cfg.get("enabled", False):
+            self._summac_det = SummaCDetector(
+                threshold=sum_cfg.get("threshold", 0.5),
+                device=sum_cfg.get("device", "cpu"),
+                model_name=sum_cfg.get("model_name", "vitc"),
+            )
+
+        align_cfg = det_cfg.get("alignscore", {})
+        if align_cfg.get("enabled", False):
+            self._alignscore_det = AlignScoreDetector(
+                checkpoint_path=align_cfg["checkpoint_path"],
+                threshold=align_cfg.get("threshold", 0.5),
+                device=align_cfg.get("device", "cpu"),
+                model_name=align_cfg.get("model_name", "roberta-base"),
             )
 
         # Build reducers from config
@@ -97,6 +119,11 @@ class BenchmarkRunner:
         if reducer_cfg.get("self_verification", {}).get("enabled", True):
             reducers.append(SelfVerificationReducer(
                 config=reducer_cfg.get("self_verification")
+            ))
+
+        if reducer_cfg.get("self_refine", {}).get("enabled", False):
+            reducers.append(SelfRefineReducer(
+                config=reducer_cfg.get("self_refine")
             ))
 
         return reducers
@@ -282,6 +309,30 @@ class BenchmarkRunner:
             except Exception as e:
                 logger.debug(f"SemanticDet error: {e}")
                 row.update({"semantic_score": None, "semantic_pred": None})
+
+        # --- Published SummaC detector: generated answer vs evidence context ---
+        if self._summac_det:
+            try:
+                r = self._summac_det.detect(sample.context, generated_answer)
+                row.update({
+                    "summac_score": r.score,
+                    "summac_pred": r.is_hallucinated,
+                })
+            except Exception as e:
+                logger.debug(f"SummaC error: {e}")
+                row.update({"summac_score": None, "summac_pred": None})
+
+        # --- Published AlignScore detector: generated answer vs evidence context ---
+        if self._alignscore_det:
+            try:
+                r = self._alignscore_det.detect(sample.context, generated_answer)
+                row.update({
+                    "alignscore_score": r.score,
+                    "alignscore_pred": r.is_hallucinated,
+                })
+            except Exception as e:
+                logger.debug(f"AlignScore error: {e}")
+                row.update({"alignscore_score": None, "alignscore_pred": None})
 
         # --- LLM judge: is generated_answer factually correct vs right_answer? ---
         if llm_det:

@@ -1,16 +1,18 @@
 """
-RAG (Retrieval-Augmented Generation) Reducer
-=============================================
+Context-Grounding Baseline
+==========================
 Provides a reference passage alongside the question.
 
 The model uses the passage as its primary source to ground
 its answer in factual information, reducing the need to rely
 on potentially incorrect memorized knowledge.
 
-In a real-world RAG system, the passage would be retrieved
-from a vector database. In our benchmark, each HaluEval sample
-already provides a relevant `context` (knowledge passage),
-so we use that directly.
+This is a local context-grounding baseline, not a complete retrieval
+implementation. In a real RAG system, the passage would be retrieved from a
+document store or vector database. In this benchmark, each sample already
+provides a relevant context passage, so we use that directly. See
+METHOD_SOURCES.md for the published RAG reference and the difference between
+this baseline and a full RAG pipeline.
 """
 from __future__ import annotations
 
@@ -24,7 +26,7 @@ if TYPE_CHECKING:
 
 
 class RAGReducer(BaseReducer):
-    """Provides the reference passage as context before asking the question."""
+    """Provides the supplied reference passage before asking the question."""
 
     def __init__(self, config: dict | None = None):
         super().__init__(name="rag", config=config)

@@ -2,10 +2,12 @@ from .base_reducer import BaseReducer
 from .rag import RAGReducer
 from .constrained_decoding import ConstrainedDecodingReducer
 from .self_verification import SelfVerificationReducer
+from .self_refine import SelfRefineReducer
 
 __all__ = [
     "BaseReducer",
     "RAGReducer",
     "ConstrainedDecodingReducer",
     "SelfVerificationReducer",
+    "SelfRefineReducer",
 ]

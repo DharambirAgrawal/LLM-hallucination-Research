@@ -8,8 +8,9 @@ Computes token-level overlap between context and answer using:
 
 Hallucination score = 1 - overlap_score
 
-From AWS blog: highest precision (0.96) but very low recall (0.03).
-Best for filtering obvious hallucinations cheaply (no LLM calls).
+This is a local lexical-overlap baseline. Its threshold and performance must be
+calibrated on the selected benchmark; results from an AWS blog experiment must
+not be presented as results for this implementation.
 """
 from __future__ import annotations
 

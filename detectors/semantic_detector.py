@@ -6,7 +6,9 @@ computes cosine similarity.  Low similarity → likely hallucination.
 
 Hallucination score = 1 - cosine_similarity(context_emb, answer_emb)
 
-From AWS blog: precision ~90% but recall only ~2% → catches obvious ones.
+This is a local similarity baseline. It is not a calibrated entailment model;
+published factuality detectors and their reference implementations are listed
+in METHOD_SOURCES.md.
 """
 from __future__ import annotations
 

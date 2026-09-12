@@ -39,6 +39,8 @@ DETECTOR_LABELS = {
     "semantic_score":  "Semantic Similarity",
     "bert_score":      "BERT Stochastic",
     "llm_score":       "LLM Judge",
+    "summac_score":    "SummaC",
+    "alignscore_score": "AlignScore",
 }
 
 # Reducer display names
@@ -47,6 +49,7 @@ REDUCER_LABELS = {
     "rag":                   "RAG",
     "constrained_decoding":  "Constrained Decoding",
     "self_verification":     "Self-Verification",
+    "self_refine":           "Self-Refine (published adapter)",
 }
 
 # Colors for plots (red = baseline/bad, green = good reductions)

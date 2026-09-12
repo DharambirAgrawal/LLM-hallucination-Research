@@ -553,7 +553,10 @@ def main():
         "",
     ]
 
-    score_cols = [c for c in ["token_score", "semantic_score", "bert_score", "llm_score"] if c in summary_df.columns]
+    score_cols = [c for c in [
+        "token_score", "semantic_score", "bert_score", "llm_score",
+        "summac_score", "alignscore_score",
+    ] if c in summary_df.columns]
     if score_cols:
         overall = (
             summary_df.groupby("reducer")[score_cols + (["mean_latency_s"] if "mean_latency_s" in summary_df.columns else [])]
