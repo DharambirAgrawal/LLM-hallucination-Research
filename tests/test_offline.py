@@ -23,6 +23,7 @@ from detectors.selfcheckgpt_detector import SelfCheckGPTDetector
 from detectors.summac_detector import SummaCDetector
 from models.openai_compatible_model import OpenAICompatibleModel
 from models.replay_model import ReplayModel
+from models.transformers_model import TransformersModel
 from utils.env_loader import load_env_file
 
 
@@ -188,6 +189,13 @@ class AdapterContractTests(unittest.TestCase):
 
 
 class RemoteAdapterTests(unittest.TestCase):
+    def test_local_transformers_model_requires_immutable_revision(self):
+        with self.assertRaisesRegex(ValueError, "immutable"):
+            TransformersModel(
+                "moving-model",
+                {"model": "example/model", "revision": "main"},
+            )
+
     def test_env_file_loading_without_overwriting_environment(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             env_file = Path(temp_dir) / ".env"

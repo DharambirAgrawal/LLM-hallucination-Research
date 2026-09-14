@@ -32,7 +32,8 @@ The project separates two questions that should not be mixed:
 
 No LLM or detector checkpoint is downloaded by the default controller workflow.
 Generation may run on another computer through Ollama or through an
-OpenAI-compatible API.
+OpenAI-compatible API, or on the Colab evaluator with the pinned small Qwen
+example in [`config.local-colab.example.yaml`](config.local-colab.example.yaml).
 
 ## Official detectors
 
@@ -192,6 +193,7 @@ benchmark/detector_validation.py labeled evaluation metrics
 data/datasets.py                 normalized paired cases
 detectors/                       thin upstream-package adapters
 models/                          remote Ollama, API, and replay adapters
+config.local-colab.example.yaml  no-API local Qwen smoke configuration
 scripts/provider_selfcheck_smoke.py bounded free-tier API integration test
 provenance/sources.yaml          commits, licenses, and integration status
 docs/COLAB.md                    copy/paste Colab workflow

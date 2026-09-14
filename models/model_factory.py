@@ -16,6 +16,7 @@ from loguru import logger
 from models.base_model import BaseModel
 from models.ollama_model import OllamaModel
 from models.openai_compatible_model import OpenAICompatibleModel
+from models.transformers_model import TransformersModel
 
 
 class ModelFactory:
@@ -64,6 +65,13 @@ class ModelFactory:
                 try:
                     models.append(OpenAICompatibleModel(name=name, config=cfg))
                     logger.info(f"  ✓ Registered remote endpoint: {name}")
+                except Exception as e:
+                    logger.error(f"  ✗ Failed to register '{name}': {e}")
+                continue
+            if provider == "transformers":
+                try:
+                    models.append(TransformersModel(name=name, config=cfg))
+                    logger.info(f"  ✓ Registered local Transformers model: {name}")
                 except Exception as e:
                     logger.error(f"  ✗ Failed to register '{name}': {e}")
                 continue

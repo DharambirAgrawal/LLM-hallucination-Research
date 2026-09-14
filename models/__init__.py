@@ -2,6 +2,7 @@ __all__ = [
     "BaseModel",
     "OllamaModel",
     "OpenAICompatibleModel",
+    "TransformersModel",
     "ReplayModel",
     "ModelFactory",
 ]
@@ -18,6 +19,9 @@ def __getattr__(name: str):
     if name == "OpenAICompatibleModel":
         from .openai_compatible_model import OpenAICompatibleModel
         return OpenAICompatibleModel
+    if name == "TransformersModel":
+        from .transformers_model import TransformersModel
+        return TransformersModel
     if name == "ReplayModel":
         from .replay_model import ReplayModel
         return ReplayModel

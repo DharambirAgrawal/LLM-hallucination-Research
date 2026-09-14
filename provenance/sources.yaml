@@ -4,6 +4,18 @@
 schema_version: 1
 
 sources:
+  qwen2_5_0_5b_instruct:
+    kind: generator-model
+    status: optional-local-colab-smoke
+    paper: https://arxiv.org/abs/2412.15115
+    repository: https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct
+    revision: c89bee90d9f811437d9735454613c35b4a3c4dc8
+    license: Apache-2.0
+    integration: huggingface-transformers
+    local_adapter: models/transformers_model.py
+    runtime: colab-evaluator-machine
+    notes: Small optional local generator for SelfCheckGPT plumbing tests; it is not a hallucination detector.
+
   selfcheckgpt:
     kind: detector
     status: source-verified-runtime-validation-pending

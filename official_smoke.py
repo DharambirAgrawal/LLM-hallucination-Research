@@ -30,8 +30,14 @@ def selfcheckgpt_smoke() -> None:
 
 
 def minicheck_smoke() -> None:
+    import nltk
+
     from detectors import MiniCheckDetector
 
+    # MiniCheck calls NLTK internally. New NLTK releases split the sentence
+    # tables into `punkt_tab`; older releases may still look for `punkt`.
+    for resource in ("punkt", "punkt_tab"):
+        nltk.download(resource, quiet=True)
     detector = MiniCheckDetector(cache_dir="/content/minicheck-checkpoints")
     print("MiniCheck official Flan-T5-Large")
     print("  factual risk:", detector.detect(CONTEXT, FACTUAL).score)

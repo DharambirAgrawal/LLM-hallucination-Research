@@ -37,6 +37,19 @@ Colab on first use.
 !python official_smoke.py minicheck
 ```
 
+`official_smoke.py` now downloads both required NLTK sentence-tokenizer
+resources before running MiniCheck. If the repository has not yet been updated
+and you see `Resource punkt_tab not found`, run this repair cell, then rerun the
+smoke test. The already downloaded 3.13 GB MiniCheck checkpoint should be reused
+from the Colab cache.
+
+```python
+import nltk
+nltk.download("punkt")
+nltk.download("punkt_tab")
+!python official_smoke.py minicheck
+```
+
 ## 4. Full labeled validation
 
 Enable only detectors installed in the current Colab environment:
@@ -50,7 +63,75 @@ prepare the official HaluEval data at the revision in
 `provenance/sources.yaml`, enable `halueval_qa` in `config.yaml`, disable the
 synthetic dataset, and use a train/validation/test threshold protocol.
 
-## 5. Connect a model running elsewhere
+## 5. Test with a small model running locally in Colab (no API key)
+
+Choose a GPU runtime (`Runtime > Change runtime type > T4 GPU`). This example
+uses the official Apache-2.0
+[`Qwen/Qwen2.5-0.5B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct)
+checkpoint pinned to the immutable revision recorded in
+`config.local-colab.example.yaml`. The model is downloaded into Colab and runs
+there; nothing is downloaded onto the development computer.
+
+If the repository is already open in Colab, update it first:
+
+```python
+%cd /content/LLM-hallucination-Research
+!git pull
+```
+
+Install the pinned official SelfCheckGPT package and run one factual/
+hallucinated pair. SelfCheckGPT draws two responses per case from the local
+Qwen model, so this needs no API secret:
+
+```python
+!pip install -q -r requirements-colab-smoke.txt
+!python main.py \
+  --config config.local-colab.example.yaml \
+  --detectors selfcheckgpt \
+  --output results/local-qwen-smoke
+```
+
+Inspect the generated scores and metric summary:
+
+```python
+import pandas as pd
+
+raw = pd.read_csv("results/local-qwen-smoke/detector_validation_raw.csv")
+summary = pd.read_csv("results/local-qwen-smoke/detector_validation_summary.csv")
+display(raw[["case_id", "label", "selfcheckgpt_score", "selfcheckgpt_error"]])
+display(summary)
+```
+
+This local model is only the **generator used by SelfCheckGPT**. MiniCheck,
+SummaC, and AlignScore are separate detector models and must be tested with
+their own official packages/checkpoints.
+
+## 6. What “test everything” currently means
+
+Run the repository-wide plumbing tests without downloading additional model
+weights:
+
+```python
+!python -m unittest discover -s tests -v
+```
+
+Then run the available official runtime checks separately:
+
+| Component | Colab command | What it verifies |
+|---|---|---|
+| SelfCheckGPT n-gram + replay | `!python official_smoke.py selfcheckgpt` | Official scorer import and scoring |
+| SelfCheckGPT + local Qwen | `!python main.py --config config.local-colab.example.yaml --detectors selfcheckgpt` | Local generation, scoring, CSV and metrics |
+| MiniCheck | `!python official_smoke.py minicheck` | Official Flan-T5-Large detector |
+| SummaC | Separate legacy environment | Official SummaC runtime compatibility |
+| AlignScore | Separate legacy environment plus checkpoint | Official AlignScore runtime compatibility |
+| Reduction methods | Not runnable yet | Self-Refine, Self-RAG, and RARR are currently documented upstream candidates, not integrated reducers |
+
+Do not run all neural detectors in one Colab environment: their pinned upstream
+dependencies conflict, and loading every checkpoint together can exhaust RAM or
+GPU memory. “All tests passed” should distinguish offline adapter tests from
+actual official checkpoint runs.
+
+## 7. Connect a model running elsewhere
 
 Only SelfCheckGPT requires repeated generations. Copy the model block from
 `config.remote.example.yaml` into a new Colab config, then set the endpoint URL.
@@ -70,7 +151,7 @@ os.environ["RESEARCH_MODEL_API_KEY"] = userdata.get("RESEARCH_MODEL_API_KEY")
 The remote endpoint must be reachable from Colab. A private LAN address is not
 reachable unless you deliberately expose it through a secured network route.
 
-## Why SummaC and AlignScore are separate
+## 8. Why SummaC and AlignScore are separate
 
 Do not install every detector into one Colab environment. SummaC and AlignScore
 were published against older PyTorch/Transformers stacks; AlignScore also needs
@@ -86,7 +167,7 @@ notebooks/environments following the upstream READMEs and exact revisions in
 Record the Python, Torch, Transformers, CUDA, package commit, and checkpoint
 hash for every successful research run.
 
-## Free-tier API sampling
+## 9. Free-tier API sampling
 
 Add `GEMINI_API_KEY` to Colab Secrets and load it without printing it:
 

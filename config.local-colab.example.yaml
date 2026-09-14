@@ -1,0 +1,33 @@
+# Small local generator downloaded and executed inside the Colab runtime.
+# Official Qwen Hugging Face model revision; no API key is required.
+models:
+  - name: "qwen2.5-0.5b-local"
+    provider: "transformers"
+    model: "Qwen/Qwen2.5-0.5B-Instruct"
+    revision: "c89bee90d9f811437d9735454613c35b4a3c4dc8"
+    temperature: 1.0
+    max_tokens: 64
+
+selected_models: ["qwen2.5-0.5b-local"]
+
+datasets:
+  - name: "synthetic"
+    enabled: true
+    source: "synthetic"
+    max_samples: 1
+
+detectors:
+  selfcheckgpt:
+    enabled: true
+    method: "ngram"
+    threshold: 3.0  # smoke placeholder; calibrate on validation data
+    n_samples: 2
+    temperature: 1.0
+    device: "cpu"
+  summac: {enabled: false}
+  minicheck: {enabled: false}
+  alignscore: {enabled: false}
+
+benchmark:
+  output_dir: "results/local-qwen-smoke"
+  seed: 42
