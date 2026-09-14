@@ -1,107 +1,179 @@
-# LLM Hallucination Research Harness
+# Reproducible LLM Hallucination Research Harness
 
-This repository validates hallucination detectors and later compares reduction
-methods without presenting locally invented heuristics as published methods.
-Detector algorithms come from pinned upstream packages; the local Python files
-are thin adapters, data normalization, model connectivity, and metric reporting.
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://www.python.org/)
+[![Methods](https://img.shields.io/badge/methods-pinned%20upstream-0B6E75.svg)](provenance/sources.yaml)
+[![Models](https://img.shields.io/badge/LLM-local%20or%20API-F28C28.svg)](config.remote.example.yaml)
+[![Status](https://img.shields.io/badge/status-runtime%20validation%20pending-6B7280.svg)](#research-status)
 
-No LLM or checkpoint is stored or downloaded by this repository's default
-workflow. Run `python main.py --dry-run` to check configuration and labeled data
-without loading a detector or contacting a model server.
+A lightweight research harness for validating published hallucination detectors
+before using them to compare hallucination-reduction methods. The repository
+does not recreate detector algorithms: it connects pinned official packages to
+one consistent data and evaluation interface.
 
-## Active official detectors
+> **Important:** source integration is complete, but runtime reproduction and
+> research results are still pending. Synthetic examples are smoke fixtures,
+> not evidence for a paper.
 
-| Detector | Source used | Local role | Runtime |
-|---|---|---|---|
-| SelfCheckGPT | [official repository](https://github.com/potsawee/selfcheckgpt) | Calls official NLI, BERTScore, or n-gram scorer; obtains samples through the common model interface | N-gram Colab smoke or separate evaluator environment |
-| MiniCheck | [official repository](https://github.com/Liyan06/MiniCheck) | Calls official sentence-level `MiniCheck.score` and converts support probability to risk | GPU Colab/evaluator; downloads official checkpoint there |
-| SummaC | [official repository](https://github.com/tingofurro/summac) | Calls official SummaC-ZS or SummaC-Conv API | Separate compatible legacy ML environment |
-| AlignScore | [official repository](https://github.com/yuh-zha/AlignScore) | Calls official `AlignScore.score` API | Separate environment plus explicit official checkpoint |
+![Research pipeline: labeled data flows through official detectors and validation before a reduction study.](assets/diagrams/research-pipeline.png)
 
-Exact Git revisions, licenses, status, and adapter paths are recorded in
-[`provenance/sources.yaml`](provenance/sources.yaml). “Integrated” means the
-adapter matches the upstream API; it does not mean runtime reproduction has
-already been completed. Successful environments and checkpoint hashes must be
-recorded before results are reported.
+*Figure 1. Intended research workflow. The remote generator is needed only for
+SelfCheckGPT sampling. Every reported run must preserve its source, license,
+checkpoint, and environment metadata.*
 
-Semantic cosine similarity, token overlap, prompted LLM judging, the former
-BERT-consistency heuristic, and the weighted ensemble are not active methods.
-They were written locally and are excluded from the runner and configuration.
+## Research objective
 
-## Correct evaluation design
+The project separates two questions that should not be mixed:
 
-The harness first creates two fixed cases per dataset item: the known factual
-answer (`label=0`) and known hallucinated answer (`label=1`). An official detector
-scores those same cases. The output includes AUROC, average precision, accuracy,
-precision, recall, and F1. Thresholds must be calibrated on validation data and
-reported on a separate held-out test set.
+1. **Detector validation:** Can a published detector distinguish fixed factual
+   and hallucinated responses on held-out labeled data?
+2. **Reduction evaluation:** After the detector is validated, does a published
+   mitigation method improve paired model outputs without unacceptable losses
+   in correctness, relevance, latency, or cost?
 
-Synthetic cases are only plumbing tests. Research claims should use official,
-pinned data such as HaluEval, RAGTruth, TRUE, or LLM-AggreFact and should include
-a human-reviewed subset.
+No LLM or detector checkpoint is downloaded by the default controller workflow.
+Generation may run on another computer through Ollama or through an
+OpenAI-compatible API.
 
-## Quick checks
+## Official detectors
+
+![Comparison of SelfCheckGPT, MiniCheck, SummaC, and AlignScore inputs and scoring flows.](assets/diagrams/official-detectors.png)
+
+*Figure 2. The detector families are related but not interchangeable.
+SelfCheckGPT measures consistency across sampled generations; MiniCheck,
+SummaC, and AlignScore measure support against supplied evidence.*
+
+| Method | What the official method measures | Paper | Code | License | Current status |
+|---|---|---|---|---|---|
+| **SelfCheckGPT** | Sentence-level inconsistency against stochastic responses from the same generator | [Manakul et al., 2023](https://aclanthology.org/2023.emnlp-main.557/) | [Official repository](https://github.com/potsawee/selfcheckgpt) | MIT | Adapter integrated; runtime validation pending |
+| **MiniCheck** | Sentence-level factual support from a grounding document | [Tang et al., 2024](https://aclanthology.org/2024.emnlp-main.499/) | [Official repository](https://github.com/Liyan06/MiniCheck) | Apache-2.0 | Adapter integrated; runtime validation pending |
+| **SummaC** | NLI-based document–response consistency | [Laban et al., 2022](https://aclanthology.org/2022.tacl-1.10/) | [Official repository](https://github.com/tingofurro/summac) | Apache-2.0 | Adapter integrated; isolated environment required |
+| **AlignScore** | Information alignment between context chunks and response claims | [Zha et al., 2023](https://aclanthology.org/2023.acl-long.634/) | [Official repository](https://github.com/yuh-zha/AlignScore) | MIT | Adapter integrated; checkpoint and isolated environment required |
+
+The local files under `detectors/` are adapters only. Exact reviewed commits are
+recorded in [`provenance/sources.yaml`](provenance/sources.yaml). Model and
+tokenizer artifact hashes must also be recorded before publishing results.
+
+The previous token-overlap, semantic-cosine, prompted LLM-judge, BERT stochastic,
+and ensemble implementations are excluded from the active imports,
+configuration, and runner. They are not alternate names for the official
+methods above.
+
+## Evaluation protocol
+
+For every source example, the loader creates a matched factual case
+(`label = 0`) and hallucinated case (`label = 1`). Detectors score the same fixed
+responses; they do not generate replacement answers during validation.
+
+The planned protocol is:
+
+1. split data at the original paired-example level;
+2. calibrate thresholds on the validation split only;
+3. freeze detector versions, checkpoints, thresholds, and seeds;
+4. report AUROC, AUPRC, precision, recall, F1, and failure counts on held-out data;
+5. confirm a representative subset through blinded human review;
+6. only then use the detector in paired reduction experiments.
+
+### Candidate datasets
+
+| Dataset | Role | Paper | Official source | Status |
+|---|---|---|---|---|
+| **HaluEval** | Matched factual and hallucinated QA responses | [Li et al., 2023](https://aclanthology.org/2023.emnlp-main.397/) | [RUCAIBox/HaluEval](https://github.com/RUCAIBox/HaluEval) | Selected; external data preparation required |
+| **RAGTruth** | Human response- and span-level RAG hallucination annotations | [Niu et al., 2024](https://aclanthology.org/2024.acl-long.585/) | [ParticleMedia/RAGTruth](https://github.com/ParticleMedia/RAGTruth) | Planned |
+| **TRUE** | Factual-consistency meta-evaluation collection | [Honovich et al., 2022](https://aclanthology.org/2022.naacl-main.287/) | [google-research/true](https://github.com/google-research/true) | Planned |
+| **LLM-AggreFact** | Aggregated grounded fact-checking benchmark released with MiniCheck | [Tang et al., 2024](https://aclanthology.org/2024.emnlp-main.499/) | [Hugging Face dataset](https://huggingface.co/datasets/lytang/LLM-AggreFact) | Revision must be pinned before use |
+
+## Reduction-method status
+
+No reduction algorithm is currently active. This prevents locally written
+prompting code from being mislabeled as a reproduction.
+
+| Candidate | Official source | Decision |
+|---|---|---|
+| **Self-Refine** | [Paper](https://proceedings.neurips.cc/paper_files/paper/2023/hash/91edff07232fb1b55a505a9e9f6c0ff3-Abstract-Conference.html) · [Code](https://github.com/madaan/self-refine) | Reference only; upstream tasks and prompts are specialized |
+| **Self-RAG** | [Paper](https://openreview.net/forum?id=hSyW5go0v8) · [Code](https://github.com/AkariAsai/self-rag) | Reference only; requires the trained model, reflection tokens, and retrieval workflow |
+| **RARR** | [Paper](https://aclanthology.org/2023.acl-long.910/) · [Code](https://github.com/anthonywchen/RARR) | Reference only; repository license must be clarified before vendoring |
+| **AWS contextual grounding** | [Service documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/guardrails-contextual-grounding-check.html) · [AWS examples](https://github.com/aws-samples/responsible_ai_reduce_hallucinations_for_genai_apps) | Possible managed-service baseline; report separately from open-source methods |
+
+The full decision record is in
+[`docs/MITIGATION_METHODS.md`](docs/MITIGATION_METHODS.md).
+
+## Running safely
+
+Configuration and data check on the development computer—no detector model or
+API request:
 
 ```bash
-# On this computer: config/data only; no detector model and no API request
 python main.py --dry-run
 ```
 
-For Colab, copy the cells from [`docs/COLAB.md`](docs/COLAB.md). The lightest
-official-package smoke test is:
+Lightweight official SelfCheckGPT n-gram integration check in Google Colab:
 
 ```bash
 pip install -r requirements-colab-smoke.txt
 python official_smoke.py selfcheckgpt
 ```
 
-The smoke script replays saved sample responses and therefore does not need an
-LLM. It proves adapter/package connectivity only, not detector quality.
+MiniCheck in a GPU Colab runtime:
 
-## Local model on another computer or an API
-
-SelfCheckGPT needs repeated outputs from the model being checked. The same
-adapter supports:
-
-- Ollama at a remote `ollama.host`; or
-- any server exposing an OpenAI-compatible `/chat/completions` endpoint.
-
-Start from [`config.remote.example.yaml`](config.remote.example.yaml). Secrets
-are read from the environment variable named by `api_key_env` and must never be
-committed. MiniCheck, SummaC, and AlignScore score an existing context/answer
-pair and do not need access to the generator.
-
-## Reduction methods
-
-There is intentionally no active reducer right now. The former “RAG,” restricted
-sampling, self-verification, and Self-Refine-inspired code were local prompt or
-sampling baselines—not official reproductions. Candidate verified approaches
-and the reasons they cannot all be plugged into an arbitrary API model are in
-[`docs/MITIGATION_METHODS.md`](docs/MITIGATION_METHODS.md).
-
-The next defensible experiment is to run one upstream method in its supported
-environment, preserve its original condition, and label any API/prompt port as
-an adaptation. Detection and reduction results must remain separate.
-
-## Repository map
-
-```text
-main.py                         fixed-pair validation CLI
-official_smoke.py               one-pair upstream integration checks
-config.yaml                     official detectors, all disabled by default
-config.remote.example.yaml      remote/API model example
-benchmark/runner.py             orchestration only
-benchmark/detector_validation.py standard labeled metrics
-detectors/                      thin official-package adapters
-models/                         remote Ollama, OpenAI-compatible, and replay adapters
-data/datasets.py                normalized fixed labeled cases
-provenance/sources.yaml         immutable source register
-docs/COLAB.md                   copy/paste Colab workflow
-docs/REPRODUCIBILITY.md         research provenance policy
-docs/MITIGATION_METHODS.md      reduction-method decision record
-docs/PROFESSOR_EMAIL.md         email draft
+```bash
+pip install -r requirements-colab-minicheck.txt
+python official_smoke.py minicheck
+python main.py --detectors minicheck --output results/colab-minicheck
 ```
 
-See [`METHOD_SOURCES.md`](METHOD_SOURCES.md) for method-by-method research
-status. Historical outputs from locally implemented methods must not be cited as
-results of this official-source harness.
+Copy-ready notebook cells and environment warnings are in
+[`docs/COLAB.md`](docs/COLAB.md).
+
+## Remote model or API
+
+SelfCheckGPT requires repeated generations. Configure either remote Ollama or an
+OpenAI-compatible `/chat/completions` endpoint using
+[`config.remote.example.yaml`](config.remote.example.yaml). API keys are read
+from the environment variable named by `api_key_env`; secrets and model weights
+must never be committed.
+
+MiniCheck, SummaC, and AlignScore evaluate existing context–answer pairs and do
+not need access to the generator.
+
+## Research status
+
+| Component | Status |
+|---|---|
+| Official source review and immutable Git revisions | Complete |
+| Thin adapters and common result schema | Complete |
+| Local/API generator connectivity | Implemented; execution test pending |
+| Colab smoke workflow | Prepared; execution test pending |
+| Detector checkpoint/runtime reproduction | Pending |
+| Held-out official-dataset validation | Pending |
+| Official reduction-method integration | Not started |
+| Proposed-method comparison | Not started |
+
+This table should be updated with evidence after each successful run. A method
+is not “reproduced” merely because its adapter imports successfully.
+
+## Repository structure
+
+```text
+assets/diagrams/                 original README figures
+benchmark/runner.py              fixed-response orchestration
+benchmark/detector_validation.py labeled evaluation metrics
+data/datasets.py                 normalized paired cases
+detectors/                       thin upstream-package adapters
+models/                          remote Ollama, API, and replay adapters
+provenance/sources.yaml          commits, licenses, and integration status
+docs/COLAB.md                    copy/paste Colab workflow
+docs/REPRODUCIBILITY.md          provenance and experiment policy
+docs/MITIGATION_METHODS.md       reduction-method decisions
+CITATION.bib                     paper citations used by this project
+```
+
+## Reproducibility and citations
+
+- Source provenance: [`provenance/sources.yaml`](provenance/sources.yaml)
+- Method details: [`METHOD_SOURCES.md`](METHOD_SOURCES.md)
+- Reproducibility policy: [`docs/REPRODUCIBILITY.md`](docs/REPRODUCIBILITY.md)
+- BibTeX references: [`CITATION.bib`](CITATION.bib)
+
+When reporting a detector, cite its original paper and official repository—not
+this adapter as the algorithm. The two diagrams above are original explanatory
+graphics for this repository and are not copied from any cited paper.
