@@ -1,2 +1,3 @@
 -r requirements.txt
 selfcheckgpt @ git+https://github.com/potsawee/selfcheckgpt.git@19b492a2a380931bf1ed0ca94a9565c9aa7b03e1
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl

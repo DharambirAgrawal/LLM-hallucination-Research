@@ -1,9 +1,3 @@
-from .base_model import BaseModel
-from .ollama_model import OllamaModel
-from .openai_compatible_model import OpenAICompatibleModel
-from .replay_model import ReplayModel
-from .model_factory import ModelFactory
-
 __all__ = [
     "BaseModel",
     "OllamaModel",
@@ -11,3 +5,23 @@ __all__ = [
     "ReplayModel",
     "ModelFactory",
 ]
+
+
+def __getattr__(name: str):
+    """Load model adapters lazily so the stdlib API client needs no packages."""
+    if name == "BaseModel":
+        from .base_model import BaseModel
+        return BaseModel
+    if name == "OllamaModel":
+        from .ollama_model import OllamaModel
+        return OllamaModel
+    if name == "OpenAICompatibleModel":
+        from .openai_compatible_model import OpenAICompatibleModel
+        return OpenAICompatibleModel
+    if name == "ReplayModel":
+        from .replay_model import ReplayModel
+        return ReplayModel
+    if name == "ModelFactory":
+        from .model_factory import ModelFactory
+        return ModelFactory
+    raise AttributeError(name)

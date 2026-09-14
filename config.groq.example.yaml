@@ -1,0 +1,34 @@
+models:
+  - name: "groq-small"
+    provider: "openai_compatible"
+    model: "llama-3.1-8b-instant"
+    base_url: "https://api.groq.com/openai/v1"
+    api_key_env: "GROQ_API_KEY"
+    env_file: ".env"
+    timeout: 30
+    temperature: 1.0
+    max_tokens: 128
+
+selected_models: ["groq-small"]
+
+datasets:
+  - name: "synthetic"
+    enabled: true
+    source: "synthetic"
+    max_samples: 2
+
+detectors:
+  selfcheckgpt:
+    enabled: true
+    method: "ngram"
+    threshold: 3.0
+    n_samples: 2
+    temperature: 1.0
+    device: "cpu"
+  summac: {enabled: false}
+  minicheck: {enabled: false}
+  alignscore: {enabled: false}
+
+benchmark:
+  output_dir: "results/groq-selfcheckgpt"
+  seed: 42

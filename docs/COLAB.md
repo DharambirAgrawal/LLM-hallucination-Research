@@ -85,3 +85,35 @@ notebooks/environments following the upstream READMEs and exact revisions in
 
 Record the Python, Torch, Transformers, CUDA, package commit, and checkpoint
 hash for every successful research run.
+
+## Free-tier API sampling
+
+Add `GEMINI_API_KEY` to Colab Secrets and load it without printing it:
+
+```python
+import os
+from google.colab import userdata
+os.environ["GEMINI_API_KEY"] = userdata.get("GEMINI_API_KEY")
+```
+
+After step 2 has installed the pinned package, run both tested Gemini free-tier
+models with two samples per case (eight short API calls total):
+
+```python
+!python3 scripts/provider_selfcheck_smoke.py
+```
+
+The command also supports `--providers openrouter` after loading an
+`OPENROUTER_API_KEY`, and `--providers mistral` after loading a
+`MISTRAL_API_KEY`. OpenRouter selects its no-cost router; Mistral availability
+depends on Studio account activation. Provider failures are recorded without
+stopping another selected provider.
+
+For the full synthetic plumbing run, copy `config.gemini.example.yaml`, then:
+
+```python
+!python main.py --config config.gemini.example.yaml --detectors selfcheckgpt
+```
+
+Do not report tiny-fixture scores as detector performance. Use held-out labeled
+data and calibrate the n-gram threshold on the validation split.

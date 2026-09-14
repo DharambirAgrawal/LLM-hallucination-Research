@@ -3,7 +3,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://www.python.org/)
 [![Methods](https://img.shields.io/badge/methods-pinned%20upstream-0B6E75.svg)](provenance/sources.yaml)
 [![Models](https://img.shields.io/badge/LLM-local%20or%20API-F28C28.svg)](config.remote.example.yaml)
-[![Status](https://img.shields.io/badge/status-runtime%20validation%20pending-6B7280.svg)](#research-status)
+[![Status](https://img.shields.io/badge/status-n--gram%20smoke%20verified-2E7D32.svg)](#research-status)
 
 A lightweight research harness for validating published hallucination detectors
 before using them to compare hallucination-reduction methods. The repository
@@ -44,7 +44,7 @@ SummaC, and AlignScore measure support against supplied evidence.*
 
 | Method | What the official method measures | Paper | Code | License | Current status |
 |---|---|---|---|---|---|
-| **SelfCheckGPT** | Sentence-level inconsistency against stochastic responses from the same generator | [Manakul et al., 2023](https://aclanthology.org/2023.emnlp-main.557/) | [Official repository](https://github.com/potsawee/selfcheckgpt) | MIT | Adapter integrated; runtime validation pending |
+| **SelfCheckGPT** | Sentence-level inconsistency against stochastic responses from the same generator | [Manakul et al., 2023](https://aclanthology.org/2023.emnlp-main.557/) | [Official repository](https://github.com/potsawee/selfcheckgpt) | MIT | Official n-gram integration verified; NLI/BERTScore checkpoints pending |
 | **MiniCheck** | Sentence-level factual support from a grounding document | [Tang et al., 2024](https://aclanthology.org/2024.emnlp-main.499/) | [Official repository](https://github.com/Liyan06/MiniCheck) | Apache-2.0 | Adapter integrated; runtime validation pending |
 | **SummaC** | NLI-based document–response consistency | [Laban et al., 2022](https://aclanthology.org/2022.tacl-1.10/) | [Official repository](https://github.com/tingofurro/summac) | Apache-2.0 | Adapter integrated; isolated environment required |
 | **AlignScore** | Information alignment between context chunks and response claims | [Zha et al., 2023](https://aclanthology.org/2023.acl-long.634/) | [Official repository](https://github.com/yuh-zha/AlignScore) | MIT | Adapter integrated; checkpoint and isolated environment required |
@@ -54,9 +54,8 @@ recorded in [`provenance/sources.yaml`](provenance/sources.yaml). Model and
 tokenizer artifact hashes must also be recorded before publishing results.
 
 The previous token-overlap, semantic-cosine, prompted LLM-judge, BERT stochastic,
-and ensemble implementations are excluded from the active imports,
-configuration, and runner. They are not alternate names for the official
-methods above.
+and ensemble implementations were removed. They are not alternate names for
+the official methods above.
 
 ## Evaluation protocol
 
@@ -106,6 +105,14 @@ API request:
 python main.py --dry-run
 ```
 
+Reusable offline integration tests mock the external packages and HTTP response;
+they verify adapter contracts, CSV generation, metrics, provenance, figures,
+documentation links, and API payload construction without an LLM:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
 Lightweight official SelfCheckGPT n-gram integration check in Google Colab:
 
 ```bash
@@ -135,15 +142,40 @@ must never be committed.
 MiniCheck, SummaC, and AlignScore evaluate existing context–answer pairs and do
 not need access to the generator.
 
+### Small free-tier API test
+
+Copy [`.env.example`](.env.example) to `.env` and add keys locally, or use
+Colab Secrets. The tested default combines `gemini-3.5-flash-lite` and
+`gemini-3.5-flash`; both are listed in Google's free tier. It makes exactly
+eight short completion calls and runs the pinned official SelfCheckGPT n-gram
+implementation on their outputs:
+
+```bash
+python3 -m venv .venv-provider-test
+.venv-provider-test/bin/python -m pip install -r requirements-colab-smoke.txt
+.venv-provider-test/bin/python scripts/provider_selfcheck_smoke.py
+```
+
+The JSON report is written to `results/provider-selfcheck-smoke.json`. Select a
+single integration with `--providers gemini`, `--providers gemini-flash`,
+`--providers openrouter`, or `--providers mistral`. OpenRouter uses the official
+`openrouter/free` router. Mistral uses `mistral-small-latest`, but API access
+still depends on the account's Studio subscription/free-mode activation.
+
+The values are official SelfCheckGPT n-gram scores, but the tiny fixture and
+uncalibrated threshold make this an engineering check—not a reportable detector
+result. [`config.gemini.example.yaml`](config.gemini.example.yaml) shows how to
+plug the same remote model into `main.py`.
+
 ## Research status
 
 | Component | Status |
 |---|---|
 | Official source review and immutable Git revisions | Complete |
 | Thin adapters and common result schema | Complete |
-| Local/API generator connectivity | Implemented; execution test pending |
-| Colab smoke workflow | Prepared; execution test pending |
-| Detector checkpoint/runtime reproduction | Pending |
+| Local/API generator connectivity | Gemini API verified with two free-tier models (2026-09-13) |
+| Colab smoke workflow | Copy-ready; local equivalent verified |
+| Detector checkpoint/runtime reproduction | SelfCheckGPT n-gram verified; neural variants pending |
 | Held-out official-dataset validation | Pending |
 | Official reduction-method integration | Not started |
 | Proposed-method comparison | Not started |
@@ -160,6 +192,7 @@ benchmark/detector_validation.py labeled evaluation metrics
 data/datasets.py                 normalized paired cases
 detectors/                       thin upstream-package adapters
 models/                          remote Ollama, API, and replay adapters
+scripts/provider_selfcheck_smoke.py bounded free-tier API integration test
 provenance/sources.yaml          commits, licenses, and integration status
 docs/COLAB.md                    copy/paste Colab workflow
 docs/REPRODUCIBILITY.md          provenance and experiment policy

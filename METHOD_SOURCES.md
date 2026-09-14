@@ -51,9 +51,8 @@ configuration, and recorded adapter behavior.
 ## Excluded local detection heuristics
 
 The former token overlap, semantic cosine, prompted LLM judge, BERT stochastic
-consistency, and ensemble implementations are excluded from active imports,
-configuration, and execution. They must not appear in results as official
-detectors. If retained in Git history, they are historical work only.
+consistency, and ensemble implementations were removed. They must not appear
+in results as official detectors; Git history is historical work only.
 
 ## Reduction
 
