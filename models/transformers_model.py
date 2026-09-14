@@ -1,6 +1,7 @@
 """Local Hugging Face Transformers generator for Colab/evaluator machines."""
 from __future__ import annotations
 
+import re
 from typing import List
 
 from models.base_model import BaseModel
@@ -13,7 +14,7 @@ class TransformersModel(BaseModel):
         super().__init__(name, config)
         self.model_id = config["model"]
         self.revision = config.get("revision")
-        if not self.revision or self.revision == "main":
+        if not self.revision or not re.fullmatch(r"[0-9a-f]{40}", self.revision):
             raise ValueError(
                 "A full immutable Hugging Face model revision is required"
             )
@@ -43,7 +44,8 @@ class TransformersModel(BaseModel):
         self._model = AutoModelForCausalLM.from_pretrained(
             self.model_id,
             revision=self.revision,
-            torch_dtype=dtype,
+            dtype=dtype,
+            attn_implementation="eager",
         ).to(self._device)
         self._model.eval()
 
@@ -52,9 +54,11 @@ class TransformersModel(BaseModel):
         import torch
 
         messages = [{"role": "user", "content": prompt}]
-        input_ids = self._tokenizer.apply_chat_template(
+        inputs = self._tokenizer.apply_chat_template(
             messages,
             add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
             return_tensors="pt",
         ).to(self._device)
         temperature = float(kwargs.get("temperature", self.temperature))
@@ -70,8 +74,8 @@ class TransformersModel(BaseModel):
             generation["top_p"] = float(kwargs.get("top_p", 0.9))
 
         with torch.inference_mode():
-            output_ids = self._model.generate(input_ids, **generation)
-        new_tokens = output_ids[0, input_ids.shape[-1]:]
+            output_ids = self._model.generate(**inputs, **generation)
+        new_tokens = output_ids[0, inputs["input_ids"].shape[-1]:]
         text = self._tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
         if not text:
             raise RuntimeError(f"Local model {self.name} returned an empty response")

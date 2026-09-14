@@ -98,8 +98,11 @@ class BenchmarkRunner:
                     row[f"{name}_error"] = None
                 except Exception as exc:
                     row[f"{name}_score"] = None
-                    row[f"{name}_error"] = f"{type(exc).__name__}: {exc}"
-                    logger.warning("{} failed on {}: {}", name, case["case_id"], exc)
+                    detail = str(exc).strip() or repr(exc)
+                    row[f"{name}_error"] = f"{type(exc).__name__}: {detail}"
+                    logger.exception(
+                        "{} failed on {}: {}", name, case["case_id"], detail
+                    )
             rows.append(row)
 
         frame = pd.DataFrame(rows)

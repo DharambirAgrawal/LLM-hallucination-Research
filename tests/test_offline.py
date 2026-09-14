@@ -12,6 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
 import yaml
 
 from benchmark.detector_validation import DetectorValidator
@@ -195,6 +196,81 @@ class RemoteAdapterTests(unittest.TestCase):
                 "moving-model",
                 {"model": "example/model", "revision": "main"},
             )
+
+    def test_local_transformers_model_uses_full_tokenizer_inputs(self):
+        generated = {}
+
+        class FakeBatch(dict):
+            def to(self, device):
+                generated["input_device"] = device
+                return self
+
+        class FakeTokenizer:
+            eos_token_id = 0
+
+            def apply_chat_template(self, messages, **kwargs):
+                generated["template_kwargs"] = kwargs
+                return FakeBatch(
+                    input_ids=np.array([[1, 2, 3]]),
+                    attention_mask=np.array([[1, 1, 1]]),
+                )
+
+            def decode(self, token_ids, **kwargs):
+                return "local response"
+
+        class FakeModel:
+            def to(self, device):
+                return self
+
+            def eval(self):
+                return self
+
+            def generate(self, **kwargs):
+                generated["generate_kwargs"] = kwargs
+                return np.array([[1, 2, 3, 4, 5]])
+
+        class FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                return FakeTokenizer()
+
+        class FakeAutoModel:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                generated["load_kwargs"] = kwargs
+                return FakeModel()
+
+        class InferenceMode:
+            def __enter__(self):
+                return None
+
+            def __exit__(self, *args):
+                return False
+
+        fake_torch = types.ModuleType("torch")
+        fake_torch.cuda = types.SimpleNamespace(is_available=lambda: False)
+        fake_torch.float16 = "float16"
+        fake_torch.float32 = "float32"
+        fake_torch.inference_mode = InferenceMode
+        fake_transformers = types.ModuleType("transformers")
+        fake_transformers.AutoTokenizer = FakeAutoTokenizer
+        fake_transformers.AutoModelForCausalLM = FakeAutoModel
+
+        config = {
+            "model": "official/model",
+            "revision": "a" * 40,
+            "max_tokens": 8,
+        }
+        with patch.dict(
+            sys.modules,
+            {"torch": fake_torch, "transformers": fake_transformers},
+        ):
+            result = TransformersModel("local", config).generate("hello")
+
+        self.assertEqual(result, "local response")
+        self.assertIn("attention_mask", generated["generate_kwargs"])
+        self.assertTrue(generated["template_kwargs"]["return_dict"])
+        self.assertEqual(generated["load_kwargs"]["attn_implementation"], "eager")
 
     def test_env_file_loading_without_overwriting_environment(self):
         with tempfile.TemporaryDirectory() as temp_dir:

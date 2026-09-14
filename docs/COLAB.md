@@ -91,16 +91,30 @@ Qwen model, so this needs no API secret:
   --output results/local-qwen-smoke
 ```
 
+The first run downloads about 1 GB of Qwen weights. Messages about Hugging Face
+authentication or tied weights are warnings, not failures. A real failure is a
+nonzero command exit followed by `All enabled detectors failed`.
+
 Inspect the generated scores and metric summary:
 
 ```python
 import pandas as pd
 
 raw = pd.read_csv("results/local-qwen-smoke/detector_validation_raw.csv")
-summary = pd.read_csv("results/local-qwen-smoke/detector_validation_summary.csv")
 display(raw[["case_id", "label", "selfcheckgpt_score", "selfcheckgpt_error"]])
-display(summary)
+
+from pathlib import Path
+summary_path = Path("results/local-qwen-smoke/detector_validation_summary.csv")
+if summary_path.exists():
+    display(pd.read_csv(summary_path))
+else:
+    print("No summary was created. Read selfcheckgpt_error above for the cause.")
 ```
+
+If a previous checkout produced a blank SelfCheckGPT error, update the
+repository and rerun the command. The adapter now follows Qwen's official
+generation form by passing both `input_ids` and `attention_mask`, and the runner
+preserves a traceback even for exceptions whose message is empty.
 
 This local model is only the **generator used by SelfCheckGPT**. MiniCheck,
 SummaC, and AlignScore are separate detector models and must be tested with
