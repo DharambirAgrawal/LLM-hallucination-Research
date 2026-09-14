@@ -97,12 +97,24 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.example
 .venv
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Research artifacts prepared on execution machines
+external_data/
+external_models/
+results/*
+.DS_Store
+*.ckpt
+*.safetensors
+*.pt
+*.pth
 
 # Spyder project settings
 .spyderproject

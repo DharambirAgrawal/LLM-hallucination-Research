@@ -1,0 +1,2 @@
+-r requirements.txt
+minicheck @ git+https://github.com/Liyan06/MiniCheck.git@b58b9fa69acbd1015ec970fa65dd752413a053d2

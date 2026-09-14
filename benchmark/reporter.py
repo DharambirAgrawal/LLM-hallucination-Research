@@ -41,6 +41,7 @@ DETECTOR_LABELS = {
     "llm_score":       "LLM Judge",
     "summac_score":    "SummaC",
     "alignscore_score": "AlignScore",
+    "selfcheckgpt_score": "SelfCheckGPT (official)",
 }
 
 # Reducer display names
@@ -49,7 +50,8 @@ REDUCER_LABELS = {
     "rag":                   "RAG",
     "constrained_decoding":  "Constrained Decoding",
     "self_verification":     "Self-Verification",
-    "self_refine":           "Self-Refine (published adapter)",
+    "self_refine":           "Self-Refine (legacy result label)",
+    "self_refine_inspired":  "Self-Refine-inspired baseline",
 }
 
 # Colors for plots (red = baseline/bad, green = good reductions)

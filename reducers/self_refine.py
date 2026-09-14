@@ -1,6 +1,6 @@
-"""Self-Refine adapter for the Ollama model interface.
+"""Local baseline inspired by the Self-Refine workflow.
 
-The algorithm follows the published Self-Refine workflow:
+The baseline uses the high-level Self-Refine workflow:
 1. generate an initial answer;
 2. ask the same model for actionable feedback;
 3. revise the answer using that feedback;
@@ -10,8 +10,8 @@ Paper: https://arxiv.org/abs/2303.17651
 Reference repository: https://github.com/madaan/self-refine
 
 The upstream repository provides task-specific prompts and experiments rather
-than a generic installable reducer. This file is the project adapter that sends
-those stages through the existing Ollama BaseModel interface.
+than a generic factual-QA reducer. These prompts were written locally, so this
+condition must not be reported as an upstream reproduction.
 """
 from __future__ import annotations
 
@@ -25,10 +25,10 @@ if TYPE_CHECKING:
 
 
 class SelfRefineReducer(BaseReducer):
-    """Run the published Self-Refine generate-feedback-revise loop."""
+    """Run a local generate-feedback-revise baseline."""
 
     def __init__(self, config: dict | None = None):
-        super().__init__(name="self_refine", config=config)
+        super().__init__(name="self_refine_inspired", config=config)
         cfg = config or {}
         self.iterations = max(1, int(cfg.get("iterations", 1)))
 

@@ -1,0 +1,147 @@
+# Exact upstream revisions reviewed on 2026-09-13.
+# Updating a revision requires re-running that method's official smoke example
+# and recording the result in docs/REPRODUCIBILITY.md.
+schema_version: 1
+
+sources:
+  selfcheckgpt:
+    kind: detector
+    status: source-verified-runtime-validation-pending
+    paper: https://arxiv.org/abs/2303.08896
+    repository: https://github.com/potsawee/selfcheckgpt
+    revision: 19b492a2a380931bf1ed0ca94a9565c9aa7b03e1
+    license: MIT
+    integration: official-package
+    local_adapter: detectors/selfcheckgpt_detector.py
+    runtime: evaluator-machine
+    notes: Official NLI and BERTScore implementations; sampled passages may come from any remote generator.
+
+  summac:
+    kind: detector
+    status: source-verified-runtime-validation-pending
+    paper: https://arxiv.org/abs/2111.09525
+    repository: https://github.com/tingofurro/summac
+    revision: c1f3da93cd074c24d8033eb27a88b5a7cc5c08fa
+    license: Apache-2.0
+    integration: official-package
+    local_adapter: detectors/summac_detector.py
+    runtime: isolated-legacy-environment
+    notes: Prefer SummaC-Conv for paper-aligned comparison; install Torch separately.
+
+  alignscore:
+    kind: detector
+    status: source-verified-legacy-runtime-validation-pending
+    paper: https://arxiv.org/abs/2305.07035
+    repository: https://github.com/yuh-zha/AlignScore
+    revision: a0936d5afee642a46b22f6c02a163478447aa493
+    license: MIT
+    integration: official-git-dependency
+    local_adapter: detectors/alignscore_detector.py
+    runtime: isolated-legacy-environment
+    notes: Requires an upstream checkpoint, spaCy model, and reproduction-compatible Torch environment.
+
+  minicheck:
+    kind: detector
+    status: source-verified-runtime-validation-pending
+    paper: https://arxiv.org/abs/2404.10774
+    repository: https://github.com/Liyan06/MiniCheck
+    revision: b58b9fa69acbd1015ec970fa65dd752413a053d2
+    license: Apache-2.0
+    integration: official-git-dependency
+    local_adapter: detectors/minicheck_detector.py
+    runtime: evaluator-machine
+    notes: Strong grounded fact-checking candidate; model artifacts must be pinned separately before use.
+
+  self_refine:
+    kind: reducer
+    status: reference-only
+    paper: https://arxiv.org/abs/2303.17651
+    repository: https://github.com/madaan/self-refine
+    revision: 9a206d41e5d2d0c241bb441f41eeadb945afaa55
+    license: Apache-2.0
+    integration: task-specific-upstream
+    local_adapter: null
+    runtime: generator-machine
+    notes: Official code is task-specific. The former local generic loop is excluded from active execution and is not an upstream reproduction.
+
+  self_rag:
+    kind: reducer
+    status: reference-only-requires-official-model
+    paper: https://arxiv.org/abs/2310.11511
+    repository: https://github.com/AkariAsai/self-rag
+    revision: 1fcdc420e48f50a7d7ab1ece5494221b93252e99
+    license: MIT
+    integration: official-model-and-runtime-required
+    local_adapter: null
+    runtime: dedicated-gpu-environment
+    notes: Requires the trained Self-RAG model, reflection tokens, retrieval workflow, and compatible vLLM stack; not portable to an arbitrary API model.
+
+  halueval:
+    kind: dataset
+    status: selected
+    paper: https://arxiv.org/abs/2305.11747
+    repository: https://github.com/RUCAIBox/HaluEval
+    revision: b7253db3cdaa0ab2c382f92b26b390109174f77e
+    license: MIT
+    integration: official-data
+    local_adapter: data/datasets.py
+    runtime: data-preparation-machine
+    notes: Use fixed correct/hallucinated pairs to validate detectors before reduction experiments.
+
+  ragtruth:
+    kind: dataset
+    status: planned
+    paper: https://arxiv.org/abs/2401.00396
+    repository: https://github.com/ParticleMedia/RAGTruth
+    revision: c103204b9ce28d6bbad859304bf30de72b8ed8fe
+    license: MIT
+    integration: official-data
+    local_adapter: null
+    runtime: data-preparation-machine
+    notes: Natural RAG responses with response- and span-level human hallucination annotations.
+
+  aws_hallucination_labs:
+    kind: reference-implementation
+    status: planned-cloud-baseline
+    repository: https://github.com/aws-samples/responsible_ai_reduce_hallucinations_for_genai_apps
+    revision: 13067872d3ecc8f294da99c9d28b5f0d36abb68b
+    license: Apache-2.0-with-restricted-example-datasets
+    integration: official-aws-sample
+    local_adapter: null
+    runtime: aws
+    notes: Code is Apache-2.0; selected example CSV data has additional restricted terms and must not be copied into this repository.
+
+  openai_guardrails:
+    kind: api-detector
+    status: planned-cloud-baseline
+    repository: https://github.com/openai/openai-guardrails-python
+    revision: ede106bb083eb33d4d4c39e461d953a788e84168
+    license: MIT
+    integration: official-api-package
+    local_adapter: null
+    runtime: openai-api
+    notes: Document-grounded hallucination detection uses OpenAI File Search and incurs API cost.
+
+  rarr:
+    kind: reducer
+    status: reference-only-license-review-required
+    paper: https://arxiv.org/abs/2210.08726
+    repository: https://github.com/anthonywchen/RARR
+    revision: 51a1a10fe5bada837a368f98cb55288ac5168c9e
+    license: not-declared-at-repository-root
+    integration: do-not-copy-until-license-cleared
+    local_adapter: null
+    runtime: generator-machine-with-search-api
+    notes: Relevant retrieve-and-revise baseline, but copying or vendoring code requires license clarification.
+
+  true_benchmark:
+    kind: dataset-and-meta-evaluation
+    status: planned
+    paper: https://arxiv.org/abs/2204.04991
+    repository: https://github.com/google-research/true
+    revision: f36230f271c218dd1aac35c70bbd6aafffdbd41f
+    license: Apache-2.0
+    integration: official-data-and-evaluation
+    local_adapter: benchmark/detector_validation.py
+    runtime: data-preparation-machine
+    notes: Use labeled grounding/generated-text pairs for detector validation and threshold tuning.

@@ -1,7 +1,7 @@
 """
 ModelFactory
 ============
-Builds OllamaModel instances from config.yaml.
+Builds local Ollama or remote OpenAI-compatible models from config.yaml.
 
 - selected_models: []  → runs ALL models whose tags are installed in Ollama
 - selected_models: ["llama3.2-3b", "mistral-7b"]  → runs only those two
@@ -15,6 +15,7 @@ from loguru import logger
 
 from models.base_model import BaseModel
 from models.ollama_model import OllamaModel
+from models.openai_compatible_model import OpenAICompatibleModel
 
 
 class ModelFactory:
@@ -22,19 +23,30 @@ class ModelFactory:
     @staticmethod
     def build_all(config: dict) -> List[BaseModel]:
         """
-        Return a list of OllamaModel instances based on config.
-        Skips models that are not installed (unless auto_pull=true).
+        Return model adapters based on config. Local Ollama models are checked
+        for availability; remote endpoints are registered without making a
+        network call until generation starts.
         """
         ollama_cfg  = config.get("ollama", {})
         host        = ollama_cfg.get("host", "http://localhost:11434")
         timeout     = ollama_cfg.get("timeout", 120)
         selected    = set(config.get("selected_models") or [])
 
-        # What's currently installed in Ollama
-        installed      = OllamaModel.list_installed(host)
+        model_configs = config.get("models", [])
+        active_configs = [
+            model_cfg for model_cfg in model_configs
+            if not selected or model_cfg.get("name") in selected
+        ]
+        needs_ollama = any(
+            model_cfg.get("provider", "ollama") == "ollama"
+            for model_cfg in active_configs
+        )
+
+        # Query Ollama only when an Ollama-backed model is configured.
+        installed = OllamaModel.list_installed(host) if needs_ollama else []
         installed_tags = set(installed)
 
-        if not installed:
+        if needs_ollama and not installed:
             logger.warning(
                 "No models found in Ollama (or Ollama is not running).\n"
                 "  Start Ollama:  ollama serve\n"
@@ -43,15 +55,23 @@ class ModelFactory:
 
         models: List[BaseModel] = []
 
-        for cfg in config.get("models", []):
+        for cfg in active_configs:
             name = cfg["name"]
             tag  = cfg["model"]
+            provider = cfg.get("provider", "ollama")
 
-            # Filter by selected_models if provided
-            if selected and name not in selected:
+            if provider == "openai_compatible":
+                try:
+                    models.append(OpenAICompatibleModel(name=name, config=cfg))
+                    logger.info(f"  ✓ Registered remote endpoint: {name}")
+                except Exception as e:
+                    logger.error(f"  ✗ Failed to register '{name}': {e}")
+                continue
+            if provider != "ollama":
+                logger.error(f"  ✗ Unknown model provider '{provider}' for '{name}'")
                 continue
 
-            # Inject host/timeout into per-model config
+            # Inject host/timeout into per-model Ollama config.
             cfg = {**cfg, "host": host, "timeout": timeout}
 
             # Check if installed (skip unless auto_pull=true)

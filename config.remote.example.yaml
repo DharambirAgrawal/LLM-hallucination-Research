@@ -1,0 +1,36 @@
+# Standalone example: repeated generations come from another computer/API.
+# Replace base_url and model. No LLM weights are downloaded by this project.
+models:
+  - name: "remote-model"
+    provider: "openai_compatible"
+    model: "your-server-model-id"
+    base_url: "https://YOUR_ENDPOINT/v1"
+    timeout: 120
+    temperature: 1.0
+    max_tokens: 512
+    # Set this secret in the environment; never put its value in YAML.
+    api_key_env: "RESEARCH_MODEL_API_KEY"
+
+selected_models: ["remote-model"]
+
+datasets:
+  - name: "synthetic"
+    enabled: true
+    source: "synthetic"
+    max_samples: 2
+
+detectors:
+  selfcheckgpt:
+    enabled: true
+    method: "ngram"
+    threshold: 3.0
+    n_samples: 3
+    temperature: 1.0
+    device: "cpu"
+  summac: {enabled: false}
+  minicheck: {enabled: false}
+  alignscore: {enabled: false}
+
+benchmark:
+  output_dir: "results/remote-smoke"
+  seed: 42

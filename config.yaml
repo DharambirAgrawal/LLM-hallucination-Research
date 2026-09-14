@@ -1,156 +1,69 @@
-# ============================================================
-#  Hallucination Benchmark — Ollama Edition
-#  Just add any model name from https://ollama.com/library
-#  No API keys. No GPU setup. Just: ollama pull <model>
-# ============================================================
+# Official-detector validation configuration.
+# Every detector is disabled by default because its upstream package may
+# download model weights. Use --dry-run locally or run the Colab workflow.
 
-# ── Ollama server ─────────────────────────────────────────────
 ollama:
-  host: "http://localhost:11434"   # change if Ollama runs remotely
-  timeout: 120                      # seconds per request
+  host: "http://localhost:11434"
+  timeout: 120
 
-# ── Models to benchmark ───────────────────────────────────────
-# Focused list: Google, Microsoft, Llama (Meta), DeepSeek, Qwen, OpenAI OSS
-# Format:  name: "display-name"
-#          model: "ollama-model-tag"
-#          auto_pull: true   ← automatically pulls if not installed
+# SelfCheckGPT alone needs repeated generations. Point this entry at an LLM
+# server on another machine, or replace it with the API example below.
 models:
-  # ── Meta / Llama family ──────────────────────────────────
-  - name: "llama3:latest"
-    model: "llama3:latest"
-    family: "meta"
+  - name: "remote-ollama"
+    provider: "ollama"
+    model: "llama3.2:3b"
     auto_pull: false
 
-  # ── Google family ─────────────────────────────────────────
-  - name: "gemma4:e4b"
-    model: "gemma4:e4b"
-    family: "google"
-    auto_pull: false
+selected_models: ["remote-ollama"]
 
-  # ── Qwen family ────────────────────────────────────────────
-  - name: "qwen2.5:latest"
-    model: "qwen2.5:latest"
-    family: "qwen"
-    auto_pull: false
-
-  # ── DeepSeek family ───────────────────────────────────────
-  - name: "deepseek-r1-7b:latest"
-    model: "deepseek-r1-7b:latest"
-    family: "deepseek"
-    auto_pull: false
-
-  # ── OpenAI OSS family ─────────────────────────────────────
-  - name: "gpt-oss:latest"
-    model: "gpt-oss:latest"
-    family: "openai"
-    auto_pull: false
-
-# ── Which models to actually run ──────────────────────────────
-# Set to [] to run ALL models listed above (that are installed)
-# Or list specific names from this filtered top-company list
-selected_models: ["llama3:latest", "qwen2.5:latest", "deepseek-r1-7b:latest","gpt-oss:latest","gemma4:e4b"]
-
-# ── Datasets ──────────────────────────────────────────────────
 datasets:
   - name: "halueval_qa"
-    source: "hf"
-    hf_path: "pminervini/HaluEval"
-    hf_subset: "qa_samples"
-    split: "data"
-    max_samples: 50                              # Start small, scale up later
+    enabled: false
+    source: "json"
+    path: "external_data/HaluEval/data/qa_data.json"
+    max_samples: 50
     context_col: "knowledge"
     question_col: "question"
     right_answer_col: "right_answer"
     hallucinated_answer_col: "hallucinated_answer"
- 
+
+  # Engineering smoke data only; do not report it as a research result.
   - name: "synthetic"
+    enabled: true
     source: "synthetic"
-    max_samples: 50
-# ── Detection Methods ─────────────────────────────────────────
+    max_samples: 8
+
 detectors:
-  llm_based:
-    enabled: true
-    threshold: 0.5
-
-  semantic_similarity:
-    enabled: true
-    threshold: 0.35
-    embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
-
-  bert_stochastic:
-    enabled: true
-    threshold: 0.75
+  selfcheckgpt:
+    enabled: false
+    method: "ngram"       # ngram is lightest; nli is the stronger checkpoint method
+    threshold: 3.0        # ngram score is unbounded; calibrate on validation data
     n_samples: 5
     temperature: 1.0
+    device: "cpu"
 
-  token_similarity:
-    enabled: true
-    bleu_threshold: 0.25
-    intersection_threshold: 0.35
-    rouge_threshold: 0.30
-
-  # Published NLI-based factuality detector.
-  # Install with: pip install -r requirements.txt. It requires a compatible
-  # PyTorch/Transformers environment; keep disabled in the default Ollama
-  # container until that environment is prepared.
   summac:
     enabled: false
     threshold: 0.5
     device: "cpu"
-    # "zs" uses the official SummaC-ZS path; "vitc" selects SummaC-Conv.
-    model_name: "zs"
+    model_name: "vitc"
 
-  # Published AlignScore detector. Requires the upstream checkpoint path.
-  # See METHOD_SOURCES.md before enabling.
+  minicheck:
+    enabled: false
+    threshold: 0.5
+    model_name: "flan-t5-large"
+    cache_dir: "external_models/minicheck"
+
   alignscore:
     enabled: false
-    checkpoint_path: "models/AlignScore-base.ckpt"
     threshold: 0.5
+    checkpoint_path: "external_models/alignscore/AlignScore-base.ckpt"
     device: "cpu"
     model_name: "roberta-base"
 
-reducers:
-  # No reduction - just ask the question directly.
-  # This gives us the baseline hallucination scores to compare against.
-  baseline:
-    enabled: true
- 
-  # Context-grounding baseline, not a live retriever yet.
-  # See METHOD_SOURCES.md before describing this as a RAG reproduction.
-  rag:
-    enabled: true
- 
-  # Restricted-sampling baseline using Ollama decoding parameters.
-  # This is not grammar-constrained decoding.
-  constrained_decoding:
-    enabled: true
-    temperature: 0.1
-    top_p: 0.3
-    top_k: 5
- 
-  # One-pass self-critique baseline. This is not the full Self-Refine method.
-  self_verification:
-    enabled: false
-
-  # Published Self-Refine algorithm connected to Ollama through an adapter.
-  # Source: https://github.com/madaan/self-refine
-  self_refine:
-    enabled: true
-    iterations: 1
- 
-  # ----- Phase 3: Novel method (to be implemented) -----
-  # brier_calibration:
-  #   enabled: false
-
-# ── Benchmark settings ────────────────────────────────────────
 benchmark:
-  output_dir: "results"
-  save_intermediate: true
+  output_dir: "results/current"
   seed: 42
-  request_timeout: 120
 
-# ── Logging ───────────────────────────────────────────────────
 logging:
   level: "INFO"
-  save_logs: true
-  log_file: "results/benchmark.log"

@@ -1,5 +1,4 @@
 from .runner import BenchmarkRunner
-from .evaluator import Evaluator
-from .reporter import Reporter
+from .detector_validation import DetectorValidator
  
-__all__ = ["BenchmarkRunner", "Evaluator", "Reporter"]
+__all__ = ["BenchmarkRunner", "DetectorValidator"]

@@ -1,0 +1,2 @@
+-r requirements.txt
+selfcheckgpt @ git+https://github.com/potsawee/selfcheckgpt.git@19b492a2a380931bf1ed0ca94a9565c9aa7b03e1

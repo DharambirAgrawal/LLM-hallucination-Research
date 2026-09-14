@@ -7,7 +7,7 @@ For each (model × reducer) combination, computes:
   - Mean score per detector (lower = better)
   - Score reduction vs baseline (how much did this reducer help?)
   - Win rate: % of samples where reducer scored lower than baseline
-  - Accuracy: % of samples classified as factual (score < threshold)
+  - Acceptance rate: % of unlabeled generations classified as factual
 
 Since we don't have ground-truth hallucination labels (we removed them
 in our workflow), we compare each reducer's scores against the baseline
@@ -26,10 +26,12 @@ from loguru import logger
 SCORE_COLS = [
     "token_score", "semantic_score", "bert_score", "llm_score",
     "summac_score", "alignscore_score",
+    "selfcheckgpt_score",
 ]
 PRED_COLS  = [
     "token_pred", "semantic_pred", "bert_pred", "llm_pred",
     "summac_pred", "alignscore_pred",
+    "selfcheckgpt_pred",
 ]
 
 
@@ -43,7 +45,10 @@ class Evaluator:
         Returns a summary DataFrame with one row per combination, containing
         mean scores across all samples for each detector.
         """
-        # Only use score columns that actually exist in the results
+        if "trial_status" in df.columns:
+            df = df[df["trial_status"] == "ok"].copy()
+
+        # Only use score columns that actually exist in successful results
         score_cols = [c for c in SCORE_COLS if c in df.columns]
         pred_cols  = [c for c in PRED_COLS  if c in df.columns]
 
@@ -59,7 +64,8 @@ class Evaluator:
               .reset_index()
         )
 
-        # Also compute "accuracy" per detector per combination:
+        # This is an acceptance rate, not accuracy: generated answers do not
+        # have human ground-truth hallucination labels in this experiment.
         # % of samples where the detector labeled the answer as NOT hallucinated
         # (i.e., pred == False means "factual")
         for pred_col in pred_cols:
@@ -68,9 +74,12 @@ class Evaluator:
                 continue
             acc = (
                 df.groupby(["model", "dataset", "reducer"])[pred_col]
-                  .apply(lambda x: (~x.astype(bool)).mean())
+                  .apply(
+                      lambda x: (~x.dropna().astype(bool)).mean()
+                      if x.notna().any() else np.nan
+                  )
                   .round(4)
-                  .reset_index(name=score_col.replace("_score", "_accuracy"))
+                  .reset_index(name=score_col.replace("_score", "_acceptance_rate"))
             )
             summary = summary.merge(
                 acc, on=["model", "dataset", "reducer"], how="left"
@@ -111,6 +120,8 @@ class Evaluator:
 
         Returns a DataFrame with average reductions per (model × reducer × detector).
         """
+        if "trial_status" in df.columns:
+            df = df[df["trial_status"] == "ok"].copy()
         score_cols = [c for c in SCORE_COLS if c in df.columns]
         if not score_cols:
             return pd.DataFrame()

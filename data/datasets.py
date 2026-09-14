@@ -31,7 +31,7 @@ class BenchmarkSample:
     question:       str
     context:        str
     right_answer:         str
-    hallucinated_answer: bool           # ground-truth label
+    hallucinated_answer: str
     metadata:       dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -195,6 +195,8 @@ class DatasetLoader:
         """Load every dataset listed in config. Returns {dataset_name: [samples]}."""
         result = {}
         for ds_cfg in self.config.get("datasets", []):
+            if not ds_cfg.get("enabled", True):
+                continue
             name   = ds_cfg["name"]
             source = ds_cfg.get("source", "hf")
             logger.info(f"Loading dataset: {name}  (source={source})")
@@ -226,7 +228,13 @@ class DatasetLoader:
         split   = cfg.get("split", "test")
         n       = cfg.get("max_samples", 200)
 
-        ds = load_dataset(path, subset, split=split, trust_remote_code=True)
+        load_kwargs = {
+            "split": split,
+            "trust_remote_code": cfg.get("trust_remote_code", False),
+        }
+        if cfg.get("revision"):
+            load_kwargs["revision"] = cfg["revision"]
+        ds = load_dataset(path, subset, **load_kwargs)
         ds = ds.shuffle(seed=self.seed).select(range(min(n, len(ds))))
 
         samples = []
@@ -301,3 +309,34 @@ class DatasetLoader:
             if sample:
                 samples.append(sample)
         return samples
+
+    @staticmethod
+    def detection_cases(samples: List[BenchmarkSample]) -> List[dict]:
+        """Create the fixed labeled pairs used for detector validation.
+
+        A detector must be evaluated on these fixed responses before it is used
+        to judge newly generated reducer outputs. Label 1 means hallucinated.
+        """
+        cases = []
+        for sample in samples:
+            if sample.right_answer:
+                cases.append({
+                    "case_id": f"{sample.sample_id}:factual",
+                    "sample_id": sample.sample_id,
+                    "dataset": sample.dataset,
+                    "question": sample.question,
+                    "context": sample.context,
+                    "answer": sample.right_answer,
+                    "label": 0,
+                })
+            if sample.hallucinated_answer:
+                cases.append({
+                    "case_id": f"{sample.sample_id}:hallucinated",
+                    "sample_id": sample.sample_id,
+                    "dataset": sample.dataset,
+                    "question": sample.question,
+                    "context": sample.context,
+                    "answer": sample.hallucinated_answer,
+                    "label": 1,
+                })
+        return cases

@@ -1,0 +1,6 @@
+# Index only. Do not install all evaluator methods in one environment.
+#
+# SelfCheckGPT: requirements-colab-smoke.txt
+# MiniCheck:    requirements-colab-minicheck.txt
+# SummaC and AlignScore: reproduce the older upstream environments separately;
+# see docs/COLAB.md and provenance/sources.yaml.

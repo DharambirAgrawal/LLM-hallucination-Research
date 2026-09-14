@@ -71,7 +71,7 @@ class OllamaModel(BaseModel):
 
     def sample_n(self, prompt: str, n: int = 5, temperature: float = 1.0) -> List[str]:
         """
-        Generate N stochastic samples (used by BERT stochastic checker).
+        Generate N stochastic samples (used by SelfCheckGPT).
         Uses high temperature for diversity.
         """
         return [
