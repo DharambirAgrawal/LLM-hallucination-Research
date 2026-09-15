@@ -33,8 +33,8 @@ class BenchmarkRunner:
 
         cfg = detector_config.get("selfcheckgpt", {})
         if cfg.get("enabled", False):
-            if self.generator is None:
-                raise ValueError("SelfCheckGPT requires a configured generator")
+            # A generator is not required here: `validate(generators=...)`
+            # supplies one (or more) per call and raises if none is usable.
             detectors["selfcheckgpt"] = SelfCheckGPTDetector(
                 model=self.generator,
                 method=cfg.get("method", "ngram"),
@@ -76,34 +76,73 @@ class BenchmarkRunner:
         return detectors
 
     def validate(
-        self, datasets: Dict[str, List[BenchmarkSample]]
+        self,
+        datasets: Dict[str, List[BenchmarkSample]],
+        generators: Optional[List[BaseModel]] = None,
     ) -> pd.DataFrame:
-        """Score fixed factual/hallucinated pairs and preserve every failure."""
+        """Score fixed factual/hallucinated pairs and preserve every failure.
+
+        `generators` scores SelfCheckGPT once per model (a `model` column
+        tags each row) instead of only the first configured model.
+        Model-independent detectors (SummaC/MiniCheck/AlignScore) are scored
+        once per case and merged into every model's row, not recomputed per
+        model.
+        """
         cases = []
         for samples in datasets.values():
             cases.extend(DatasetLoader.detection_cases(samples))
 
+        selfcheck = self.detectors.get("selfcheckgpt")
+        other_detectors = {
+            name: detector for name, detector in self.detectors.items()
+            if name != "selfcheckgpt"
+        }
+        active_generators = (
+            generators if generators is not None
+            else ([self.generator] if self.generator else [])
+        )
+        if selfcheck is not None and not any(active_generators):
+            raise ValueError("SelfCheckGPT is enabled but no generator model was provided")
+
         rows = []
         for case in tqdm(cases, desc="official detector validation", ncols=90):
-            row = dict(case)
-            for name, detector in self.detectors.items():
+            base_row = dict(case)
+            for name, detector in other_detectors.items():
                 try:
-                    if name == "selfcheckgpt":
-                        result = detector.detect(
-                            case["question"], case["context"], case["answer"]
-                        )
-                    else:
-                        result = detector.detect(case["context"], case["answer"])
-                    row[f"{name}_score"] = result.score
-                    row[f"{name}_error"] = None
+                    result = detector.detect(case["context"], case["answer"])
+                    base_row[f"{name}_score"] = result.score
+                    base_row[f"{name}_error"] = None
                 except Exception as exc:
-                    row[f"{name}_score"] = None
+                    base_row[f"{name}_score"] = None
                     detail = str(exc).strip() or repr(exc)
-                    row[f"{name}_error"] = f"{type(exc).__name__}: {detail}"
+                    base_row[f"{name}_error"] = f"{type(exc).__name__}: {detail}"
                     logger.exception(
                         "{} failed on {}: {}", name, case["case_id"], detail
                     )
-            rows.append(row)
+
+            if selfcheck is None:
+                rows.append(base_row)
+                continue
+
+            for generator in active_generators:
+                row = dict(base_row)
+                row["model"] = getattr(generator, "name", None)
+                try:
+                    result = selfcheck.detect(
+                        case["question"], case["context"], case["answer"],
+                        model=generator,
+                    )
+                    row["selfcheckgpt_score"] = result.score
+                    row["selfcheckgpt_error"] = None
+                except Exception as exc:
+                    row["selfcheckgpt_score"] = None
+                    detail = str(exc).strip() or repr(exc)
+                    row["selfcheckgpt_error"] = f"{type(exc).__name__}: {detail}"
+                    logger.exception(
+                        "selfcheckgpt failed on {} ({}): {}",
+                        case["case_id"], row["model"], detail,
+                    )
+                rows.append(row)
 
         frame = pd.DataFrame(rows)
         output = self.output_dir / "detector_validation_raw.csv"

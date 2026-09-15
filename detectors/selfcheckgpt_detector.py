@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import List, TYPE_CHECKING
+from typing import List, Optional, TYPE_CHECKING
 
 import numpy as np
 
@@ -29,7 +29,7 @@ class SelfCheckGPTDetector:
 
     def __init__(
         self,
-        model: "BaseModel",
+        model: Optional["BaseModel"] = None,
         method: str = "nli",
         n_samples: int = 5,
         temperature: float = 1.0,
@@ -78,23 +78,37 @@ class SelfCheckGPTDetector:
         return [part.strip() for part in parts if part.strip()]
 
     def detect(
-        self, question: str, context: str, answer: str
+        self,
+        question: str,
+        context: str,
+        answer: str,
+        model: Optional["BaseModel"] = None,
     ) -> SelfCheckGPTResult:
+        """Score one fixed answer. `model` overrides the constructor's model
+        for this call only, so one detector/scorer instance can be reused
+        across several generators instead of reloading a checkpoint per model."""
         self._load()
         if not answer.strip():
             return SelfCheckGPTResult(score=1.0, is_hallucinated=True)
+
+        generator = model or self.model
+        if generator is None:
+            raise ValueError(
+                "SelfCheckGPT needs a generator model, either bound at "
+                "construction or passed to detect(model=...)"
+            )
 
         prompt = (
             "Answer the question based on the supplied context. Do not add "
             "unsupported information.\n\n"
             f"Context: {context}\n\nQuestion: {question}\n\nAnswer:"
         )
-        if hasattr(self.model, "sample_n"):
-            samples = self.model.sample_n(
+        if hasattr(generator, "sample_n"):
+            samples = generator.sample_n(
                 prompt, n=self.n_samples, temperature=self.temperature
             )
         else:
-            samples = self.model.generate_batch(
+            samples = generator.generate_batch(
                 [prompt] * self.n_samples, temperature=self.temperature
             )
         samples = [sample for sample in samples if sample.strip()]

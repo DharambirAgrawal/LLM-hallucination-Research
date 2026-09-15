@@ -138,7 +138,7 @@ Then run the available official runtime checks separately:
 | MiniCheck | `!python official_smoke.py minicheck` | Official Flan-T5-Large detector |
 | SummaC | Separate legacy environment | Official SummaC runtime compatibility |
 | AlignScore | Separate legacy environment plus checkpoint | Official AlignScore runtime compatibility |
-| Reduction methods | Not runnable yet | Self-Refine, Self-RAG, and RARR are currently documented upstream candidates, not integrated reducers |
+| Reduction (local inspired baseline) | `!python main.py --config config.local-colab.example.yaml --detectors selfcheckgpt --reduce` | Self-Refine-adapted loop, NOT an upstream reproduction — see `docs/MITIGATION_METHODS.md`. Self-RAG and RARR remain reference-only candidates, not integrated. |
 
 Do not run all neural detectors in one Colab environment: their pinned upstream
 dependencies conflict, and loading every checkpoint together can exhaust RAM or

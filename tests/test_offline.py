@@ -16,6 +16,7 @@ import numpy as np
 import yaml
 
 from benchmark.detector_validation import DetectorValidator
+from benchmark.reduction_runner import ReductionRunner
 from benchmark.runner import BenchmarkRunner
 from data.datasets import DatasetLoader
 from detectors.alignscore_detector import AlignScoreDetector
@@ -25,6 +26,7 @@ from detectors.summac_detector import SummaCDetector
 from models.openai_compatible_model import OpenAICompatibleModel
 from models.replay_model import ReplayModel
 from models.transformers_model import TransformersModel
+from reducers.self_refine import SelfRefineReducer
 from utils.env_loader import load_env_file
 
 
@@ -187,6 +189,44 @@ class AdapterContractTests(unittest.TestCase):
                 self.assertTrue(frame[f"{name}_score"].notna().all())
                 self.assertTrue(frame[f"{name}_error"].isna().all())
             self.assertTrue((Path(temp_dir) / "detector_validation_raw.csv").exists())
+
+    def test_runner_scores_every_selected_generator(self):
+        """Every model passed via `generators=` is scored, not only the first."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = {
+                "datasets": [{
+                    "name": "synthetic",
+                    "enabled": True,
+                    "source": "synthetic",
+                    "max_samples": 1,
+                }],
+                "detectors": {
+                    "selfcheckgpt": {
+                        "enabled": True,
+                        "method": "ngram",
+                        "n_samples": 1,
+                        "threshold": 3.0,
+                    },
+                },
+                "benchmark": {"output_dir": temp_dir, "seed": 42},
+            }
+            datasets = DatasetLoader(config, seed=42).load_all()
+            model_a = ReplayModel([self.factual], name="model-a")
+            model_b = ReplayModel(["unrelated text"], name="model-b")
+            frame = BenchmarkRunner(config, generator=model_a).validate(
+                datasets, generators=[model_a, model_b]
+            )
+            self.assertEqual(sorted(frame["model"].unique()), ["model-a", "model-b"])
+            self.assertEqual(len(frame), 4)  # 2 cases (factual/hallucinated) x 2 models
+            self.assertTrue(frame["selfcheckgpt_score"].notna().all())
+
+    def test_validate_requires_a_generator_when_selfcheckgpt_is_enabled(self):
+        config = {
+            "detectors": {"selfcheckgpt": {"enabled": True, "method": "ngram"}},
+        }
+        runner = BenchmarkRunner({**config, "benchmark": {"output_dir": tempfile.mkdtemp()}})
+        with self.assertRaises(ValueError):
+            runner.validate({"synthetic": []}, generators=[])
 
 
 class RemoteAdapterTests(unittest.TestCase):
@@ -374,6 +414,106 @@ class DocumentationTests(unittest.TestCase):
             adapter = source.get("local_adapter")
             if adapter:
                 self.assertTrue((ROOT / adapter).exists(), adapter)
+
+
+class ScriptedModel:
+    """Minimal duck-typed generator returning canned responses in order."""
+
+    def __init__(self, name: str, responses):
+        self.name = name
+        self._responses = list(responses)
+
+    def generate(self, prompt, **kwargs):
+        return self._responses.pop(0)
+
+    def generate_batch(self, prompts, **kwargs):
+        return ["sample"] * len(prompts)
+
+
+class SelfRefineReducerTests(unittest.TestCase):
+    def test_stops_when_model_reports_no_issues(self):
+        model = ScriptedModel("m", ["NO_ISSUES"])
+        reducer = SelfRefineReducer(model=model, max_iterations=3)
+        result = reducer.reduce("When?", "context", initial_answer="Python was released in 1991.")
+        self.assertEqual(result.final_answer, "Python was released in 1991.")
+        self.assertEqual(result.initial_answer, "Python was released in 1991.")
+        self.assertEqual(result.iterations, 1)
+        self.assertEqual(result.stopped_reason, "no_issues_reported")
+
+    def test_revises_until_iteration_budget_is_spent(self):
+        model = ScriptedModel("m", [
+            "Unsupported claim here.",
+            "Revised answer 1.",
+            "Still an issue.",
+            "Revised answer 2.",
+        ])
+        reducer = SelfRefineReducer(model=model, max_iterations=2)
+        result = reducer.reduce("When?", "context", initial_answer="Initial answer.")
+        self.assertEqual(result.final_answer, "Revised answer 2.")
+        self.assertEqual(result.iterations, 2)
+        self.assertEqual(result.stopped_reason, "max_iterations")
+        self.assertEqual(len(result.feedback_history), 2)
+
+    def test_rejects_non_positive_iteration_budget(self):
+        with self.assertRaises(ValueError):
+            SelfRefineReducer(model=ScriptedModel("m", ["x"]), max_iterations=0)
+
+
+class ReductionRunnerTests(unittest.TestCase):
+    def setUp(self):
+        self.modules = patch.dict(sys.modules, fake_upstream_modules())
+        self.modules.start()
+
+    def tearDown(self):
+        self.modules.stop()
+
+    def test_rejects_a_non_selfcheckgpt_detector(self):
+        with tempfile.NamedTemporaryFile() as checkpoint:
+            alignscore = AlignScoreDetector(checkpoint_path=checkpoint.name)
+            with self.assertRaises(ValueError):
+                ReductionRunner({"benchmark": {"output_dir": tempfile.mkdtemp()}}, alignscore)
+
+    def test_scores_baseline_and_refined_answers_with_the_frozen_detector(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = {
+                "datasets": [{
+                    "name": "synthetic", "enabled": True, "source": "synthetic", "max_samples": 1,
+                }],
+                "reduction": {"method": "self_refine_adapted", "max_iterations": 1},
+                "benchmark": {"output_dir": temp_dir, "seed": 42},
+            }
+            datasets = DatasetLoader(config, seed=42).load_all()
+            detector = SelfCheckGPTDetector(method="ngram", n_samples=1, threshold=3.0)
+            model = ScriptedModel("model-a", [
+                "Python was released in 1985.",              # baseline answer
+                "The year 1985 is not supported by the context.",  # feedback (not NO_ISSUES)
+                "Python was released in 1991.",              # refined answer
+            ])
+            frame = ReductionRunner(config, detector).run(datasets, generators=[model])
+            self.assertEqual(len(frame), 1)
+            row = frame.iloc[0]
+            self.assertIsNone(row["error"])
+            self.assertEqual(row["baseline_answer"], "Python was released in 1985.")
+            self.assertEqual(row["refined_answer"], "Python was released in 1991.")
+            self.assertEqual(row["baseline_score"], 4.0)
+            self.assertEqual(row["refined_score"], 1.0)
+            self.assertEqual(row["score_delta"], -3.0)
+            self.assertEqual(row["iterations"], 1)
+            self.assertEqual(row["stopped_reason"], "max_iterations")
+            # The "not upstream" fact must be readable from the raw CSV alone.
+            self.assertEqual(row["method"], "self_refine_adapted")
+            self.assertEqual(row["reproduction_status"], "local_inspired_baseline_NOT_an_upstream_reproduction")
+            self.assertTrue((Path(temp_dir) / "reduction_comparison.csv").exists())
+
+    def test_rejects_an_unqualified_method_name(self):
+        """Config must say 'self_refine_adapted', never bare 'self_refine'."""
+        config = {
+            "reduction": {"method": "self_refine"},
+            "benchmark": {"output_dir": tempfile.mkdtemp()},
+        }
+        detector = SelfCheckGPTDetector(method="ngram")
+        with self.assertRaises(ValueError):
+            ReductionRunner(config, detector)
 
 
 if __name__ == "__main__":

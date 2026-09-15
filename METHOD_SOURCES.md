@@ -56,10 +56,26 @@ in results as official detectors; Git history is historical work only.
 
 ## Reduction
 
-No reducer is active. See [`docs/MITIGATION_METHODS.md`](docs/MITIGATION_METHODS.md).
+One local-inspired baseline is active. See
+[`docs/MITIGATION_METHODS.md`](docs/MITIGATION_METHODS.md) for the full
+decision record.
 
-- [Self-Refine](https://github.com/madaan/self-refine) is official but task-
-  specific. A generic QA prompt port is an adaptation, not a reproduction.
+### Self-Refine — local inspired adaptation (not upstream)
+
+- Paper: [Self-Refine](https://arxiv.org/abs/2303.17651)
+- Reference code (task-specific prompts only, not vendored): [madaan/self-refine](https://github.com/madaan/self-refine), Apache-2.0
+- Adapter: [`reducers/self_refine.py`](reducers/self_refine.py)
+- Orchestration: [`benchmark/reduction_runner.py`](benchmark/reduction_runner.py)
+- Reuses only the paper's generate → feedback → refine control loop; every
+  prompt is local to this harness's grounded-QA setting, not copied from the
+  upstream repository (which has no QA/hallucination-reduction task). Report
+  results from it as a **local inspired baseline**, never as "Self-Refine"
+  without that qualification.
+- Scored with the same frozen SelfCheckGPT detector configured for detector
+  validation, so baseline and revised answers are directly comparable.
+
+### Other candidates
+
 - [Self-RAG](https://github.com/AkariAsai/self-rag) is official but requires its
   trained checkpoint, reflection tokens, and retrieval/inference workflow.
 - [RARR](https://github.com/anthonywchen/RARR) is relevant but is reference-only

@@ -66,15 +66,24 @@ sources:
 
   self_refine:
     kind: reducer
-    status: reference-only
+    status: local-inspired-baseline-active
     paper: https://arxiv.org/abs/2303.17651
     repository: https://github.com/madaan/self-refine
     revision: 9a206d41e5d2d0c241bb441f41eeadb945afaa55
     license: Apache-2.0
-    integration: task-specific-upstream
-    local_adapter: null
+    integration: local-inspired-adaptation
+    local_adapter: reducers/self_refine.py
     runtime: generator-machine
-    notes: Official code is task-specific. The former local generic loop is excluded from active execution and is not an upstream reproduction.
+    notes: >-
+      Official code is task-specific (math, code, dialogue, ...); no official
+      grounded-QA/hallucination-reduction task exists upstream, so this cannot
+      be labeled an upstream reproduction. The adapter reuses only the paper's
+      generate/feedback/refine control loop; every prompt is local and written
+      for this harness's grounded-QA setting, not copied from the upstream
+      repository. Report results from this adapter as a LOCAL INSPIRED
+      BASELINE, per docs/REPRODUCIBILITY.md Stage C, never as "Self-Refine"
+      without that qualification. Scored with the same frozen SelfCheckGPT
+      detector configured for Stage A; see benchmark/reduction_runner.py.
 
   self_rag:
     kind: reducer

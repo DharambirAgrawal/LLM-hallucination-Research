@@ -8,13 +8,38 @@ ollama:
 
 # SelfCheckGPT alone needs repeated generations. Point this entry at an LLM
 # server on another machine, or replace it with the API example below.
+#
+# Cross-lab, fast-model set for detector research (avoid single-vendor bias).
+# Verify every tag with `ollama pull <tag>` on the research machine first —
+# some names below (esp. deepseek-r1, gemma3) may have newer successors by
+# the time you run this; check `ollama list` / ollama.com/library.
 models:
-  - name: "remote-ollama"
+  - name: "llama3.2-3b"       # Meta
     provider: "ollama"
     model: "llama3.2:3b"
     auto_pull: false
 
-selected_models: ["remote-ollama"]
+  - name: "qwen2.5-7b"        # Alibaba
+    provider: "ollama"
+    model: "qwen2.5:7b"
+    auto_pull: false
+
+  - name: "deepseek-r1-7b"    # DeepSeek (Qwen-distilled reasoning model)
+    provider: "ollama"
+    model: "deepseek-r1:7b"
+    auto_pull: false
+
+  - name: "gemma3-4b"         # Google
+    provider: "ollama"
+    model: "gemma3:4b"
+    auto_pull: false
+
+  - name: "gpt-oss-20b"       # OpenAI (open-weight, MoE — fast despite size)
+    provider: "ollama"
+    model: "gpt-oss:20b"
+    auto_pull: false
+
+selected_models: ["llama3.2-3b", "qwen2.5-7b", "deepseek-r1-7b", "gemma3-4b", "gpt-oss-20b"]
 
 datasets:
   - name: "halueval_qa"
@@ -60,6 +85,18 @@ detectors:
     checkpoint_path: "external_models/alignscore/AlignScore-base.ckpt"
     device: "cpu"
     model_name: "roberta-base"
+
+# Stage B: local-inspired reduction baseline, scored with the SAME frozen
+# SelfCheckGPT detector configured above. Not an upstream reproduction — see
+# `self_refine` in provenance/sources.yaml and docs/MITIGATION_METHODS.md.
+# Disabled by default; enable with --reduce or reduction.enabled: true.
+reduction:
+  enabled: false
+  # "_adapted" is not decorative: the code refuses "self_refine" alone so this
+  # can never be quoted as plain, unqualified "Self-Refine" in a results table.
+  method: "self_refine_adapted"
+  detector: "selfcheckgpt"   # only supported value today
+  max_iterations: 3
 
 benchmark:
   output_dir: "results/current"

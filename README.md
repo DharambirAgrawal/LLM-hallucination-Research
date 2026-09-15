@@ -84,12 +84,17 @@ The planned protocol is:
 
 ## Reduction-method status
 
-No reduction algorithm is currently active. This prevents locally written
-prompting code from being mislabeled as a reproduction.
+One **local inspired baseline** is active: a generic-QA adaptation of
+Self-Refine (`reducers/self_refine.py`), scored with the same frozen
+SelfCheckGPT detector used for validation above. It is explicitly not an
+upstream reproduction — see
+[`docs/MITIGATION_METHODS.md`](docs/MITIGATION_METHODS.md#active-integration-self-refine-adaptation-local-inspired-baseline)
+before reporting any result from it. This label discipline prevents locally
+written prompting code from being mislabeled as a reproduction.
 
 | Candidate | Official source | Decision |
 |---|---|---|
-| **Self-Refine** | [Paper](https://proceedings.neurips.cc/paper_files/paper/2023/hash/91edff07232fb1b55a505a9e9f6c0ff3-Abstract-Conference.html) · [Code](https://github.com/madaan/self-refine) | Reference only; upstream tasks and prompts are specialized |
+| **Self-Refine** | [Paper](https://proceedings.neurips.cc/paper_files/paper/2023/hash/91edff07232fb1b55a505a9e9f6c0ff3-Abstract-Conference.html) · [Code](https://github.com/madaan/self-refine) | Integrated as a local inspired baseline (not upstream); upstream tasks and prompts are specialized |
 | **Self-RAG** | [Paper](https://openreview.net/forum?id=hSyW5go0v8) · [Code](https://github.com/AkariAsai/self-rag) | Reference only; requires the trained model, reflection tokens, and retrieval workflow |
 | **RARR** | [Paper](https://aclanthology.org/2023.acl-long.910/) · [Code](https://github.com/anthonywchen/RARR) | Reference only; repository license must be clarified before vendoring |
 | **AWS contextual grounding** | [Service documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/guardrails-contextual-grounding-check.html) · [AWS examples](https://github.com/aws-samples/responsible_ai_reduce_hallucinations_for_genai_apps) | Possible managed-service baseline; report separately from open-source methods |
@@ -98,6 +103,10 @@ The full decision record is in
 [`docs/MITIGATION_METHODS.md`](docs/MITIGATION_METHODS.md).
 
 ## Running safely
+
+For the full run reference — every config knob, the multi-model detector
+loop, and the Self-Refine reduction stage — see
+[`docs/HOW_TO_RUN.md`](docs/HOW_TO_RUN.md).
 
 Configuration and data check on the development computer—no detector model or
 API request:
@@ -178,6 +187,7 @@ plug the same remote model into `main.py`.
 | Colab smoke workflow | Copy-ready; local equivalent verified |
 | Detector checkpoint/runtime reproduction | SelfCheckGPT n-gram verified; neural variants pending |
 | Held-out official-dataset validation | Pending |
+| Local inspired reduction baseline (Self-Refine adaptation) | Active (2026-09-15); paired smoke comparison only, not Stage B evidence |
 | Official reduction-method integration | Not started |
 | Proposed-method comparison | Not started |
 
@@ -188,10 +198,12 @@ is not “reproduced” merely because its adapter imports successfully.
 
 ```text
 assets/diagrams/                 original README figures
-benchmark/runner.py              fixed-response orchestration
+benchmark/runner.py              fixed-response orchestration (all selected models)
 benchmark/detector_validation.py labeled evaluation metrics
+benchmark/reduction_runner.py    Stage B: paired baseline vs. reduced-answer comparison
 data/datasets.py                 normalized paired cases
 detectors/                       thin upstream-package adapters
+reducers/self_refine.py          local-inspired Self-Refine adaptation (not upstream)
 models/                          remote Ollama, API, and replay adapters
 config.local-colab.example.yaml  no-API local Qwen smoke configuration
 scripts/provider_selfcheck_smoke.py bounded free-tier API integration test
