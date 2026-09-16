@@ -41,9 +41,15 @@ models:
 
 selected_models: ["llama3.2-3b", "qwen2.5-7b", "deepseek-r1-7b", "gemma3-4b", "gpt-oss-20b"]
 
+# Real HaluEval data (`halueval_qa`/`halueval_dialogue`/`halueval_summarization`)
+# gives 3 genuinely different task types instead of one repeating synthetic
+# pool. Run `python scripts/prepare_halueval.py` once to fetch the official
+# files at the commit pinned in provenance/sources.yaml, then these three
+# load real, distinct rows — nothing here repeats past `max_samples` the way
+# `synthetic` below does once you exceed its small fixed pool.
 datasets:
   - name: "halueval_qa"
-    enabled: false
+    enabled: true
     source: "json"
     path: "external_data/HaluEval/data/qa_data.json"
     max_samples: 50
@@ -52,7 +58,34 @@ datasets:
     right_answer_col: "right_answer"
     hallucinated_answer_col: "hallucinated_answer"
 
-  # Engineering smoke data only; do not report it as a research result.
+  - name: "halueval_dialogue"
+    enabled: true
+    source: "json"
+    path: "external_data/HaluEval/data/dialogue_data.json"
+    max_samples: 50
+    context_col: "knowledge"
+    # "dialogue_history" plays the role of "question" here: the prior turns
+    # the assistant must respond to, per HaluEval's dialogue task.
+    question_col: "dialogue_history"
+    right_answer_col: "right_response"
+    hallucinated_answer_col: "hallucinated_response"
+
+  - name: "halueval_summarization"
+    enabled: true
+    source: "json"
+    path: "external_data/HaluEval/data/summarization_data.json"
+    max_samples: 50
+    context_col: "document"
+    # HaluEval's summarization split has no per-row question field. This
+    # fixed instruction is local benchmark policy (see METHOD_SOURCES.md),
+    # not part of HaluEval's own schema.
+    question_template: "Summarize the passage above in 2-3 sentences."
+    right_answer_col: "right_summary"
+    hallucinated_answer_col: "hallucinated_summary"
+
+  # Small fixed pool (9 contexts) that repeats once max_samples exceeds it —
+  # engineering smoke data only, kept small on purpose. Do not report it as
+  # a research result; the three HaluEval datasets above are the real data.
   - name: "synthetic"
     enabled: true
     source: "synthetic"

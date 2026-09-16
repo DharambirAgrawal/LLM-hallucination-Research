@@ -1,0 +1,5 @@
+# Isolated environment for the official SummaC package. Do not install this
+# alongside requirements-colab-minicheck.txt or requirements-alignscore.txt —
+# see docs/HOW_TO_RUN.md §3 for why. Reviewed commit: provenance/sources.yaml.
+-r requirements.txt
+summac

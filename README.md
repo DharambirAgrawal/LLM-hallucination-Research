@@ -77,7 +77,7 @@ The planned protocol is:
 
 | Dataset | Role | Paper | Official source | Status |
 |---|---|---|---|---|
-| **HaluEval** | Matched factual and hallucinated QA responses | [Li et al., 2023](https://aclanthology.org/2023.emnlp-main.397/) | [RUCAIBox/HaluEval](https://github.com/RUCAIBox/HaluEval) | Selected; external data preparation required |
+| **HaluEval** | Matched factual/hallucinated QA, dialogue, and summarization responses | [Li et al., 2023](https://aclanthology.org/2023.emnlp-main.397/) | [RUCAIBox/HaluEval](https://github.com/RUCAIBox/HaluEval) | Wired in as 3 datasets (`halueval_qa`/`_dialogue`/`_summarization`); run `python scripts/prepare_halueval.py` once to fetch the pinned files |
 | **RAGTruth** | Human response- and span-level RAG hallucination annotations | [Niu et al., 2024](https://aclanthology.org/2024.acl-long.585/) | [ParticleMedia/RAGTruth](https://github.com/ParticleMedia/RAGTruth) | Planned |
 | **TRUE** | Factual-consistency meta-evaluation collection | [Honovich et al., 2022](https://aclanthology.org/2022.naacl-main.287/) | [google-research/true](https://github.com/google-research/true) | Planned |
 | **LLM-AggreFact** | Aggregated grounded fact-checking benchmark released with MiniCheck | [Tang et al., 2024](https://aclanthology.org/2024.emnlp-main.499/) | [Hugging Face dataset](https://huggingface.co/datasets/lytang/LLM-AggreFact) | Revision must be pinned before use |
@@ -105,7 +105,9 @@ The full decision record is in
 ## Running safely
 
 For the full run reference — every config knob, the multi-model detector
-loop, and the Self-Refine reduction stage — see
+loop, the Self-Refine reduction stage, and the one-command
+`scripts/run_full.py` that runs every detector in its own isolated venv and
+produces a combined CSV/chart/report — see
 [`docs/HOW_TO_RUN.md`](docs/HOW_TO_RUN.md).
 
 Configuration and data check on the development computer—no detector model or
@@ -206,6 +208,9 @@ detectors/                       thin upstream-package adapters
 reducers/self_refine.py          local-inspired Self-Refine adaptation (not upstream)
 models/                          remote Ollama, API, and replay adapters
 config.local-colab.example.yaml  no-API local Qwen smoke configuration
+scripts/run_full.py              runs every detector (own venv) + reduction, one report
+scripts/generate_report.py       combines per-detector CSVs into charts + REPORT.md
+scripts/prepare_halueval.py      fetches official HaluEval QA/dialogue/summarization data
 scripts/provider_selfcheck_smoke.py bounded free-tier API integration test
 provenance/sources.yaml          commits, licenses, and integration status
 docs/COLAB.md                    copy/paste Colab workflow

@@ -106,10 +106,24 @@ of this repository alongside the report.
 Do this on the data/execution machine, not on the lightweight controller:
 
 ```bash
+python scripts/prepare_halueval.py
+```
+
+This fetches the three official HaluEval files with a matched right/
+hallucinated pair (`qa_data.json`, `dialogue_data.json`,
+`summarization_data.json`) directly from the commit pinned in
+`provenance/sources.yaml`, and prints a sha256 for each — record those
+alongside any reported run. `halueval_qa`, `halueval_dialogue`, and
+`halueval_summarization` are already enabled in `config.yaml` and point at
+these paths. `general_data.json` is not fetched: it labels a single response
+hallucinated or not without a matched pair, so it does not fit this harness's
+paired-case schema (`data/datasets.py:detection_cases`).
+
+Equivalent by hand, if you'd rather not run the script:
+
+```bash
 git clone https://github.com/RUCAIBox/HaluEval.git external_data/HaluEval
 git -C external_data/HaluEval checkout b7253db3cdaa0ab2c382f92b26b390109174f77e
 ```
 
-Then enable `halueval_qa` in `config.yaml`. The path already points to the
-official `qa_data.json`. Keep `external_data/` out of Git; record a checksum of
-the input file with each reported run.
+Keep `external_data/` out of Git either way.

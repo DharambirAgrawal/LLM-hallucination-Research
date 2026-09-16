@@ -59,8 +59,10 @@ Enable only detectors installed in the current Colab environment:
 ```
 
 The default synthetic pairs only test the plumbing. For reportable results,
-prepare the official HaluEval data at the revision in
-`provenance/sources.yaml`, enable `halueval_qa` in `config.yaml`, disable the
+run `!python scripts/prepare_halueval.py` (fetches `qa_data.json`,
+`dialogue_data.json`, `summarization_data.json` at the revision pinned in
+`provenance/sources.yaml`; `halueval_qa`/`halueval_dialogue`/
+`halueval_summarization` are already enabled in `config.yaml`), disable the
 synthetic dataset, and use a train/validation/test threshold protocol.
 
 ## 5. Test with a small model running locally in Colab (no API key)

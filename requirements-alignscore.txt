@@ -1,0 +1,11 @@
+# Isolated environment for the official AlignScore package. Do not install
+# this alongside requirements-colab-minicheck.txt or requirements-summac.txt —
+# see docs/HOW_TO_RUN.md §3 for why. Pinned to the commit reviewed in
+# provenance/sources.yaml.
+#
+# AlignScore also needs a downloaded checkpoint that this file does not fetch
+# (no default download, per METHOD_SOURCES.md) — see AlignScoreDetector's
+# checkpoint_path / config.yaml's detectors.alignscore.checkpoint_path.
+-r requirements.txt
+alignscore @ git+https://github.com/yuh-zha/AlignScore.git@a0936d5afee642a46b22f6c02a163478447aa493
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl

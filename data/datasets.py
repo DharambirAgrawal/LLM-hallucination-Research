@@ -267,12 +267,19 @@ class DatasetLoader:
         q_col           = cfg.get("question_col", "question")
         right_col       = cfg.get("right_answer_col", "right_answer")
         halluc_col      = cfg.get("hallucinated_answer_col", "hallucinated_answer")
- 
+
         context             = self._get_text(row, ctx_col)
         question            = self._get_text(row, q_col)
         right_answer        = self._get_text(row, right_col)
         hallucinated_answer = self._get_text(row, halluc_col)
- 
+
+        # Some source datasets have no per-row question field (e.g. HaluEval's
+        # summarization split: a document + a reference summary, no question).
+        # `question_template` is local benchmark policy for that case, not
+        # part of the original dataset — see METHOD_SOURCES.md.
+        if not question and cfg.get("question_template"):
+            question = cfg["question_template"]
+
         # Must have context and question at minimum
         if not context or not question:
             return None
@@ -298,9 +305,25 @@ class DatasetLoader:
 # ── JSON ────────────────────────────────────────────────
 
     def _load_json(self, cfg: dict) -> List[BenchmarkSample]:
+        """Load a `.json` dataset file.
+
+        HaluEval's official files (qa_data.json, dialogue_data.json,
+        summarization_data.json) are JSON Lines — one JSON object per line,
+        not a single JSON array — despite the `.json` extension. Support both
+        so this loader works on the real official files, not just a
+        hand-built array fixture.
+        """
         path = Path(cfg["path"])
-        with open(path) as f:
-            data = json.load(f)
+        if not path.exists():
+            raise FileNotFoundError(
+                f"{path} not found. Run `python scripts/prepare_halueval.py` "
+                f"(or see docs/REPRODUCIBILITY.md) to fetch official data first."
+            )
+        text = path.read_text(encoding="utf-8").strip()
+        if text.startswith("["):
+            data = json.loads(text)
+        else:
+            data = [json.loads(line) for line in text.splitlines() if line.strip()]
 
         samples = []
         name = cfg["name"]
