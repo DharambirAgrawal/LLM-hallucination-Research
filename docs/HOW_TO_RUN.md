@@ -1,5 +1,45 @@
 # How to run
 
+## 0. First-time setup on a new Linux machine
+
+Needs: `python3`, `pip`, `git`, and Ollama already installed with the models
+listed in `config.yaml`'s `selected_models` pulled (`ollama pull llama3.2:3b`,
+etc. — check with `ollama list`).
+
+If `python3` is present but `pip` is not (common on Debian/Ubuntu, which ships
+Python without pip):
+
+```bash
+sudo apt update && sudo apt install -y python3-pip python3-venv   # Debian/Ubuntu
+# or: sudo dnf install -y python3-pip                             # Fedora/RHEL
+```
+
+If you don't have `sudo`, `python3 -m ensurepip --upgrade` works on most
+distributions, but Debian/Ubuntu's system Python often ships that module
+disabled — the `apt install` above is the reliable path there.
+
+Then, from the repository root, create an isolated environment and install
+the controller plus the pinned official SelfCheckGPT package (this is the
+only detector wired into the multi-model + reduction pipeline below; see
+[§3](#3-adding-the-other-detectors-minicheck--summac--alignscore) for why
+MiniCheck/SummaC/AlignScore are separate):
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-colab-smoke.txt
+```
+
+Confirm Ollama is reachable before running anything:
+
+```bash
+ollama list                # models pulled locally
+curl -s http://localhost:11434/api/tags   # Ollama API is up
+```
+
+`config.yaml`'s `ollama.host` already points at `http://localhost:11434`,
+which is correct when Ollama runs on the same Linux machine as this repo.
+
 ## 1. Smoke test first — always
 
 Tiny data, all your models, both stages. Run it, check nothing errored, then
@@ -26,6 +66,38 @@ python main.py --detectors selfcheckgpt --reduce --output results/full-run
 ```
 
 Runs every model in `config.yaml`'s `selected_models`, one after another.
+
+## 3. Adding the other detectors (MiniCheck / SummaC / AlignScore)
+
+`--detectors` accepts more than one name
+(`--detectors selfcheckgpt minicheck`), but only SelfCheckGPT needs a
+generator, feeds the reduction stage, and installs from
+`requirements-colab-smoke.txt`. The other three:
+
+- score already-fixed context/answer pairs (no generator, no `--reduce`
+  support — `main.py` hard-errors if `reduction.detector` is anything but
+  `selfcheckgpt`);
+- each need their own upstream package, pinned separately because their git
+  dependencies fix different, conflicting `torch`/`transformers` versions:
+  - MiniCheck: `pip install -r requirements-colab-minicheck.txt`
+  - SummaC: `pip install summac` (isolated legacy environment; see
+    `provenance/sources.yaml`)
+  - AlignScore: see `METHOD_SOURCES.md` — needs a downloaded checkpoint too.
+
+Do not install all four into the same virtualenv — that's not a limitation
+in this repo's code, it's the actual upstream packages conflicting. Validate
+each one in its own venv, e.g.:
+
+```bash
+python3 -m venv .venv-minicheck
+source .venv-minicheck/bin/activate
+pip install -r requirements-colab-minicheck.txt
+python main.py --detectors minicheck --max-samples 5 --output results/minicheck-smoke
+deactivate
+```
+
+Then compare each detector's `detector_validation_summary.csv` side by side —
+you don't need them in one process to get one report.
 
 ## GPU or no GPU?
 
