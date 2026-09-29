@@ -39,7 +39,8 @@ class SummaCDetector:
             from summac.model_summac import SummaCConv, SummaCZS
         except ImportError as exc:
             raise RuntimeError(
-                "SummaC is not installed. Install it with `pip install summac`."
+                "SummaC is not installed. Install the pinned revision with "
+                "`pip install -r requirements-summac.txt`."
             ) from exc
         if self.model_name == "zs":
             self._model = SummaCZS(

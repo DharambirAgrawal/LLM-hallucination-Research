@@ -207,9 +207,11 @@ data/datasets.py                 normalized paired cases
 detectors/                       thin upstream-package adapters
 reducers/self_refine.py          local-inspired Self-Refine adaptation (not upstream)
 models/                          remote Ollama, API, and replay adapters
+utils/console.py                 terminal layout, progress bars, run.log
+utils/run_manifest.py            run_manifest.json / config_used.yaml / environment.txt
 config.local-colab.example.yaml  no-API local Qwen smoke configuration
 scripts/run_full.py              runs every detector (own venv) + reduction, one report
-scripts/generate_report.py       combines per-detector CSVs into charts + REPORT.md
+scripts/generate_report.py       charts + REPORT.md for any run folder (main.py calls it)
 scripts/prepare_halueval.py      fetches official HaluEval QA/dialogue/summarization data
 scripts/provider_selfcheck_smoke.py bounded free-tier API integration test
 provenance/sources.yaml          commits, licenses, and integration status

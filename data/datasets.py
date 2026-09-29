@@ -1,10 +1,16 @@
 """
 Dataset loader for hallucination benchmarks.
 
-Supports:
-  - HaluEval       : pminervini/HaluEval  (qa_samples, summarization_samples, etc.)
-  - RAGBench        : rungalileo/ragbench  (techqa, hotpotqa, etc.)
-  - Synthetic       : Auto-generated QA pairs with planted hallucinations
+Sources:
+  - json      : local files such as the official HaluEval QA / dialogue /
+                summarization data (RUCAIBox/HaluEval, commit pinned in
+                provenance/sources.yaml; fetch with scripts/prepare_halueval.py)
+  - hf        : a Hugging Face dataset (pin `revision` before reporting)
+  - synthetic : 8 hand-written QA pairs with planted hallucinations
+                (engineering smoke fixture only, not research data)
+
+Every source is sampled with the configured seed, so `max_samples` draws a
+reproducible random subset of the whole file rather than its first rows.
 """
 
 from __future__ import annotations
@@ -155,12 +161,8 @@ SYNTHETIC_CONTEXTS = [
 
 
 def _make_synthetic(max_samples: int, seed: int = 42) -> List[BenchmarkSample]:
-    """
-    Generate synthetic benchmark samples for our reduction experiment.
-    Each sample has both a right and hallucinated reference answer,
-    but those are NOT the model's input - the model generates its own answer.
-    """
-    random.seed(seed)
+    """Build the synthetic smoke fixture. The pool repeats once `max_samples`
+    exceeds its 8 entries, so keep it small."""
     samples = []
     pool = SYNTHETIC_CONTEXTS * (max_samples // len(SYNTHETIC_CONTEXTS) + 1)
     pool = pool[:max_samples]
@@ -175,7 +177,7 @@ def _make_synthetic(max_samples: int, seed: int = 42) -> List[BenchmarkSample]:
             hallucinated_answer=item["hallucinated_answer"],
         ))
  
-    random.shuffle(samples)
+    random.Random(seed).shuffle(samples)
     return samples[:max_samples]
 
 # ─────────────────────────────────────────────
@@ -199,7 +201,7 @@ class DatasetLoader:
                 continue
             name   = ds_cfg["name"]
             source = ds_cfg.get("source", "hf")
-            logger.info(f"Loading dataset: {name}  (source={source})")
+            logger.debug(f"Loading dataset: {name}  (source={source})")
             try:
                 if source == "hf":
                     samples = self._load_hf(ds_cfg)
@@ -212,9 +214,9 @@ class DatasetLoader:
                     continue
 
                 result[name] = samples
-                logger.info(f"  ✓ {len(samples)} samples loaded from '{name}'")
+                logger.debug(f"{len(samples)} samples loaded from '{name}'")
             except Exception as exc:
-                logger.error(f"  ✗ Failed to load '{name}': {exc}")
+                logger.error(f"Failed to load dataset '{name}': {exc}")
 
         return result
 
@@ -251,17 +253,11 @@ class DatasetLoader:
         return samples
 
     def _normalise_row(self, row: dict, cfg: dict, dataset_name: str, idx: int) -> Optional[BenchmarkSample]:
-        """
-        Map raw dataset row columns to BenchmarkSample fields.
- 
-        For our reduction experiment, we need:
-          - context (reference passage)
-          - question
-          - right_answer (correct answer, for reference)
-          - hallucinated_answer (known wrong answer, for reference)
- 
-        The model will generate its own answer - we don't use the dataset's answers
-        as input, only as reference to verify our results.
+        """Map raw dataset columns to BenchmarkSample fields.
+
+        right_answer / hallucinated_answer become the fixed labeled
+        responses for detector validation. The reduction stage uses only
+        question + context; the model writes its own answer there.
         """
         ctx_col         = cfg.get("context_col", "context")
         q_col           = cfg.get("question_col", "question")
@@ -325,10 +321,17 @@ class DatasetLoader:
         else:
             data = [json.loads(line) for line in text.splitlines() if line.strip()]
 
+        # Seeded random subset of the whole file; sample_id keeps the
+        # original 0-based line index so every case traces back to its row.
+        indices = list(range(len(data)))
+        random.Random(self.seed).shuffle(indices)
+        limit = cfg.get("max_samples", 200)
         samples = []
         name = cfg["name"]
-        for i, row in enumerate(data[: cfg.get("max_samples", 200)]):
-            sample = self._normalise_row(row, cfg, name, i)
+        for i in indices:
+            if len(samples) >= limit:
+                break
+            sample = self._normalise_row(data[i], cfg, name, i)
             if sample:
                 samples.append(sample)
         return samples

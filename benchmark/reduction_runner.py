@@ -14,17 +14,19 @@ that needs a generator model, which the reduction loop already requires.
 """
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Dict, List
 
 import pandas as pd
 from loguru import logger
-from tqdm import tqdm
 
+from benchmark.runner import MAX_CONSECUTIVE_FAILURES
 from data.datasets import BenchmarkSample
 from detectors.selfcheckgpt_detector import SelfCheckGPTDetector
 from models.base_model import BaseModel
+from utils import console
 
 REDUCERS = {}
 
@@ -71,9 +73,15 @@ class ReductionRunner:
         samples = [sample for group in datasets.values() for sample in group]
         rows = []
 
-        for model in generators:
+        total = len(generators)
+        for index, model in enumerate(generators, 1):
             reducer = self.reducer_cls(model=model, max_iterations=self.max_iterations)
-            for sample in tqdm(samples, desc=f"reduction[{model.name}]", ncols=90):
+            label = f"[{index}/{total}] {model.name}"
+            started = time.monotonic()
+            failures = consecutive = 0
+            first_error = None
+            bar = console.progress(samples, desc=f"{label:<26}", total=len(samples), unit="sample")
+            for sample in bar:
                 row = {
                     "sample_id": sample.sample_id,
                     "dataset": sample.dataset,
@@ -83,6 +91,11 @@ class ReductionRunner:
                     "method": reducer.METHOD_ID,
                     "reproduction_status": reducer.REPRODUCTION_STATUS,
                 }
+                if consecutive >= MAX_CONSECUTIVE_FAILURES:
+                    row["error"] = f"skipped after {MAX_CONSECUTIVE_FAILURES} consecutive failures"
+                    failures += 1
+                    rows.append(row)
+                    continue
                 start = time.monotonic()
                 try:
                     result = reducer.reduce(sample.question, sample.context)
@@ -100,19 +113,35 @@ class ReductionRunner:
                         "score_delta": refined.score - baseline.score,
                         "iterations": result.iterations,
                         "stopped_reason": result.stopped_reason,
+                        "feedback_history": json.dumps(result.feedback_history, ensure_ascii=False),
                         "latency_seconds": time.monotonic() - start,
                         "error": None,
                     })
+                    consecutive = 0
                 except Exception as exc:
                     detail = str(exc).strip() or repr(exc)
                     row["error"] = f"{type(exc).__name__}: {detail}"
-                    logger.exception(
+                    logger.opt(exception=exc).debug(
                         "Reduction failed for {} ({}): {}", sample.sample_id, model.name, detail
                     )
+                    failures += 1
+                    consecutive += 1
+                    first_error = first_error or row["error"]
+                    bar.set_postfix_str(f"failed={failures}")
                 rows.append(row)
+            bar.close()
+
+            elapsed = console.duration(time.monotonic() - started)
+            if failures == 0:
+                console.line(f"✓ {model.name} · {len(samples)} samples in {elapsed}")
+            else:
+                logger.warning(
+                    f"{model.name}: {failures}/{len(samples)} reductions failed in {elapsed}"
+                    f" · first error: {first_error[:160]}"
+                )
 
         frame = pd.DataFrame(rows)
         output = self.output_dir / "reduction_comparison.csv"
         frame.to_csv(output, index=False)
-        logger.info("Saved reduction comparison to {}", output)
+        logger.debug("Saved reduction comparison to {}", output)
         return frame

@@ -1,12 +1,12 @@
 """Run pinned upstream detectors on fixed, labeled responses."""
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import pandas as pd
 from loguru import logger
-from tqdm import tqdm
 
 from data.datasets import BenchmarkSample, DatasetLoader
 from detectors import (
@@ -16,6 +16,12 @@ from detectors import (
     SummaCDetector,
 )
 from models.base_model import BaseModel
+from utils import console
+
+# Stop a model/detector after this many failures in a row: the cause is
+# almost always environmental (server down, model missing, package broken),
+# and continuing would spend hours recording the same error.
+MAX_CONSECUTIVE_FAILURES = 10
 
 
 class BenchmarkRunner:
@@ -71,8 +77,6 @@ class BenchmarkRunner:
 
         if not detectors:
             logger.warning("No detector is enabled in the configuration")
-        else:
-            logger.info("Enabled official detectors: {}", ", ".join(detectors))
         return detectors
 
     def validate(
@@ -82,11 +86,10 @@ class BenchmarkRunner:
     ) -> pd.DataFrame:
         """Score fixed factual/hallucinated pairs and preserve every failure.
 
-        `generators` scores SelfCheckGPT once per model (a `model` column
-        tags each row) instead of only the first configured model.
-        Model-independent detectors (SummaC/MiniCheck/AlignScore) are scored
-        once per case and merged into every model's row, not recomputed per
-        model.
+        Model-independent detectors (SummaC/MiniCheck/AlignScore) score each
+        case once. SelfCheckGPT then runs one model at a time over every
+        case, so Ollama keeps a single model loaded instead of swapping
+        models on every case; a `model` column tags each of its rows.
         """
         cases = []
         for samples in datasets.values():
@@ -104,51 +107,80 @@ class BenchmarkRunner:
         if selfcheck is not None and not any(active_generators):
             raise ValueError("SelfCheckGPT is enabled but no generator model was provided")
 
-        rows = []
-        for case in tqdm(cases, desc="official detector validation", ncols=90):
-            base_row = dict(case)
-            for name, detector in other_detectors.items():
-                try:
-                    result = detector.detect(case["context"], case["answer"])
-                    base_row[f"{name}_score"] = result.score
-                    base_row[f"{name}_error"] = None
-                except Exception as exc:
-                    base_row[f"{name}_score"] = None
-                    detail = str(exc).strip() or repr(exc)
-                    base_row[f"{name}_error"] = f"{type(exc).__name__}: {detail}"
-                    logger.exception(
-                        "{} failed on {}: {}", name, case["case_id"], detail
-                    )
+        base_rows = [dict(case) for case in cases]
+        for name, detector in other_detectors.items():
+            self._score_all(
+                base_rows, name, label=name,
+                score=lambda case, d=detector: d.detect(case["context"], case["answer"]),
+            )
 
-            if selfcheck is None:
-                rows.append(base_row)
-                continue
-
-            for generator in active_generators:
-                row = dict(base_row)
-                row["model"] = getattr(generator, "name", None)
-                try:
-                    result = selfcheck.detect(
-                        case["question"], case["context"], case["answer"],
-                        model=generator,
-                    )
-                    row["selfcheckgpt_score"] = result.score
-                    row["selfcheckgpt_error"] = None
-                except Exception as exc:
-                    row["selfcheckgpt_score"] = None
-                    detail = str(exc).strip() or repr(exc)
-                    row["selfcheckgpt_error"] = f"{type(exc).__name__}: {detail}"
-                    logger.exception(
-                        "selfcheckgpt failed on {} ({}): {}",
-                        case["case_id"], row["model"], detail,
-                    )
-                rows.append(row)
+        if selfcheck is None:
+            rows = base_rows
+        else:
+            rows = []
+            total = len(active_generators)
+            for index, generator in enumerate(active_generators, 1):
+                model_name = getattr(generator, "name", None)
+                model_rows = [{**row, "model": model_name} for row in base_rows]
+                self._score_all(
+                    model_rows, "selfcheckgpt",
+                    label=f"[{index}/{total}] {model_name}",
+                    score=lambda case, g=generator: selfcheck.detect(
+                        case["question"], case["context"], case["answer"], model=g,
+                    ),
+                )
+                rows.extend(model_rows)
 
         frame = pd.DataFrame(rows)
         output = self.output_dir / "detector_validation_raw.csv"
         frame.to_csv(output, index=False)
-        logger.info("Saved raw detector validation to {}", output)
+        logger.debug("Saved raw detector validation to {}", output)
         return frame
+
+    @staticmethod
+    def _score_all(rows: List[dict], name: str, label: str, score) -> None:
+        """Fill `<name>_score` / `<name>_error` on every row, with one
+        progress bar and a one-line outcome. Tracebacks go to run.log."""
+        started = time.monotonic()
+        failures = 0
+        consecutive = 0
+        first_error = None
+        bar = console.progress(rows, desc=f"{label:<26}", total=len(rows))
+        for row in bar:
+            if consecutive >= MAX_CONSECUTIVE_FAILURES:
+                row[f"{name}_score"] = None
+                row[f"{name}_error"] = (
+                    f"skipped after {MAX_CONSECUTIVE_FAILURES} consecutive failures"
+                )
+                failures += 1
+                continue
+            try:
+                row[f"{name}_score"] = score(row).score
+                row[f"{name}_error"] = None
+                consecutive = 0
+            except Exception as exc:
+                detail = str(exc).strip() or repr(exc)
+                row[f"{name}_score"] = None
+                row[f"{name}_error"] = f"{type(exc).__name__}: {detail}"
+                logger.opt(exception=exc).debug(
+                    "{} failed on {}: {}", label, row["case_id"], detail
+                )
+                failures += 1
+                consecutive += 1
+                first_error = first_error or row[f"{name}_error"]
+                bar.set_postfix_str(f"failed={failures}")
+        bar.close()
+
+        elapsed = console.duration(time.monotonic() - started)
+        if failures == 0:
+            console.line(f"✓ {label.strip()} · {len(rows)} cases in {elapsed}")
+        else:
+            aborted = consecutive >= MAX_CONSECUTIVE_FAILURES
+            logger.warning(
+                f"{label.strip()}: {failures}/{len(rows)} cases failed in {elapsed}"
+                + (" (stopped early)" if aborted else "")
+                + f" · first error: {first_error[:160]}"
+            )
 
     def thresholds(self) -> dict[str, float]:
         """Return configured decision thresholds for enabled detectors."""

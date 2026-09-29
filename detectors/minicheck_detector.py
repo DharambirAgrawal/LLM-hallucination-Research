@@ -36,8 +36,8 @@ class MiniCheckDetector:
             from minicheck.minicheck import MiniCheck
         except ImportError as exc:
             raise RuntimeError(
-                "MiniCheck is not installed. Use requirements-colab.txt or "
-                "install its pinned revision from provenance/sources.yaml."
+                "MiniCheck is not installed. Install the pinned revision with "
+                "`pip install -r requirements-colab-minicheck.txt`."
             ) from exc
         self._scorer = MiniCheck(
             model_name=self.model_name,

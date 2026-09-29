@@ -88,7 +88,18 @@ def fake_upstream_modules() -> dict[str, types.ModuleType]:
 
     alignscore_module.AlignScore = FakeAlignScore
 
+    # No spaCy model offline: the SelfCheckGPT adapter falls back to its
+    # regex splitter. (Loading real spaCy inside patch.dict would unload
+    # its C extensions afterwards and crash the interpreter at exit.)
+    spacy_module = types.ModuleType("spacy")
+
+    def missing_model(name):
+        raise OSError(f"offline test: {name} not loaded")
+
+    spacy_module.load = missing_model
+
     return {
+        "spacy": spacy_module,
         "selfcheckgpt": selfcheck_package,
         "selfcheckgpt.modeling_selfcheck": selfcheck_module,
         "minicheck": minicheck_package,
@@ -514,6 +525,95 @@ class ReductionRunnerTests(unittest.TestCase):
         detector = SelfCheckGPTDetector(method="ngram")
         with self.assertRaises(ValueError):
             ReductionRunner(config, detector)
+
+
+class CountingModel(ReplayModel):
+    def __init__(self, responses, name="counting"):
+        super().__init__(responses, name=name)
+        self.calls = 0
+
+    def sample_n(self, prompt, n=5, temperature=1.0):
+        self.calls += 1
+        return super().sample_n(prompt, n=n, temperature=temperature)
+
+
+class RunIntegrityTests(unittest.TestCase):
+    def setUp(self):
+        self.modules = patch.dict(sys.modules, fake_upstream_modules())
+        self.modules.start()
+
+    def tearDown(self):
+        self.modules.stop()
+
+    def test_factual_and_hallucinated_answers_share_one_sample_set(self):
+        model = CountingModel(["Python was released in 1991."])
+        detector = SelfCheckGPTDetector(model, method="ngram", n_samples=2, threshold=3.0)
+        detector.detect("When?", "ctx", "Python was released in 1991.")
+        detector.detect("When?", "ctx", "Python was released in 1985.")
+        self.assertEqual(model.calls, 1)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "samples.jsonl"
+            self.assertEqual(detector.export_samples(path), 1)
+            record = json.loads(path.read_text().splitlines()[0])
+            self.assertEqual(record["model"], "counting")
+            self.assertEqual(len(record["samples"]), 2)
+
+    def test_empty_answer_is_a_failure_not_a_score(self):
+        detector = SelfCheckGPTDetector(ReplayModel(["x"]), method="ngram")
+        with self.assertRaises(ValueError):
+            detector.detect("When?", "ctx", "   ")
+
+    def test_summary_counts_failed_cases(self):
+        import pandas as pd
+        frame = pd.DataFrame({
+            "label": [0, 1, 0, 1],
+            "x_score": [0.1, 0.9, None, 0.8],
+        })
+        row = DetectorValidator().evaluate_frame(frame, ["x_score"], {"x_score": 0.5}).iloc[0]
+        self.assertEqual(row["n_cases"], 3)
+        self.assertEqual(row["n_failed"], 1)
+
+    def test_single_run_folder_gets_the_same_report_files_as_a_full_run(self):
+        sys.path.insert(0, str(ROOT))
+        from scripts.generate_report import generate
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = {
+                "datasets": [{"name": "synthetic", "enabled": True,
+                              "source": "synthetic", "max_samples": 4}],
+                "detectors": {"selfcheckgpt": {"enabled": True, "method": "ngram",
+                                               "n_samples": 2, "threshold": 3.0}},
+                "benchmark": {"output_dir": temp_dir, "seed": 42},
+            }
+            datasets = DatasetLoader(config, seed=42).load_all()
+            runner = BenchmarkRunner(config)
+            raw = runner.validate(datasets, generators=[ReplayModel(["Python was released in 1991."])])
+            summary = DetectorValidator().evaluate_frame(raw, ["selfcheckgpt_score"],
+                                                         {"selfcheckgpt_score": 3.0})
+            summary["model"] = "replay"
+            summary.to_csv(Path(temp_dir) / "detector_validation_summary.csv", index=False)
+            produced = generate(Path(temp_dir))
+            self.assertTrue(produced["report"].is_file())
+            self.assertTrue((Path(temp_dir) / "combined_summary.csv").is_file())
+            self.assertTrue(any((Path(temp_dir) / "charts").glob("*.png")))
+
+    def test_ollama_failure_raises_instead_of_returning_empty_text(self):
+        fake_ollama = types.ModuleType("ollama")
+
+        class FailingClient:
+            def __init__(self, host=None, **kwargs):
+                pass
+
+            def chat(self, **kwargs):
+                return {"message": {"content": "<think>only reasoning</think>"}}
+
+        fake_ollama.Client = FailingClient
+        with patch.dict(sys.modules, {"ollama": fake_ollama}), \
+                patch("models.ollama_model.time.sleep"):
+            from models.ollama_model import OllamaModel
+            model = OllamaModel("m", {"model": "m:1b"})
+            with self.assertRaises(RuntimeError):
+                model.generate("hi")
 
 
 if __name__ == "__main__":

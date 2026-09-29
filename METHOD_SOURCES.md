@@ -17,6 +17,16 @@ configuration, and recorded adapter behavior.
   not be treated as a probability. NLI/BERTScore require evaluator checkpoints.
 - Samples may come from remote Ollama or an OpenAI-compatible endpoint. That
   provider substitution affects generation, not the upstream scoring function.
+- Responses are split into sentences with spaCy `en_core_web_sm`, exactly as
+  in the upstream README. The n-gram scorer builds its vocabulary with the
+  same spaCy segmentation; a different splitter produced tokens it never
+  counted and scores of `inf`. A non-finite score is recorded as a failure.
+- The N samples are drawn once per (generator, question + context) and every
+  answer to that prompt is scored against them, as in the paper's setup. All
+  samples are archived in `selfcheckgpt_samples.jsonl`.
+- For reasoning models (`deepseek-r1`, `gpt-oss`) the Ollama `think` setting
+  is configured per model and any `<think>` block is removed, so only the
+  final answer is sampled and scored.
 
 ### MiniCheck — official adapter
 
@@ -25,6 +35,8 @@ configuration, and recorded adapter behavior.
 - Adapter: [`detectors/minicheck_detector.py`](detectors/minicheck_detector.py)
 - Calls the upstream `MiniCheck.score(docs, claims)` API. The upstream guidance
   says multi-sentence responses should first be separated into sentences.
+- Upstream calls `nltk.sent_tokenize`; `main.py` downloads the NLTK `punkt`
+  data before MiniCheck, SummaC, or AlignScore runs.
 - The adapter reports `1 - minimum(sentence support probability)` as its declared
   response-level aggregation. This aggregation is local benchmark policy, not a
   new detector and not a value claimed by the MiniCheck paper.

@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Combine one full run's per-detector outputs into combined CSVs, PNG
-charts, and a REPORT.md — all in the same run folder scripts/run_full.py
-already wrote to.
+"""Turn a run folder into combined CSVs, PNG charts, and a REPORT.md.
 
-Input layout expected under --input:
-    <input>/<detector_name>/detector_validation_summary.csv   (one or more)
-    <input>/<detector_name>/detector_validation_raw.csv       (one or more)
-    <input>/selfcheckgpt/reduction_comparison.csv              (optional)
+Works on both layouts, so a smoke run and a full run produce the same files:
+
+    single main.py run (main.py calls this itself at the end):
+        <input>/detector_validation_summary.csv, detector_validation_raw.csv,
+        reduction_comparison.csv (optional), run_manifest.json
+
+    scripts/run_full.py run (one sub-folder per detector):
+        <input>/<detector_name>/detector_validation_summary.csv   (one or more)
+        <input>/<detector_name>/detector_validation_raw.csv       (one or more)
+        <input>/selfcheckgpt/reduction_comparison.csv              (optional)
 
 Produces, per detector: an overall (all datasets blended) comparison, a
 per-dataset breakdown (does it do better on QA than summarization, etc.), and
@@ -22,6 +26,7 @@ stays available in the raw `combined_reduction.csv` if it's ever needed.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -42,19 +47,27 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def find(input_dir: Path, filename: str) -> list[Path]:
+    """The run's own file when `input_dir` is a single main.py run,
+    otherwise one per detector sub-folder (scripts/run_full.py layout)."""
+    if (input_dir / filename).is_file():
+        return [input_dir / filename]
+    return sorted(input_dir.glob(f"*/{filename}"))
+
+
 def load_summaries(input_dir: Path) -> pd.DataFrame:
     frames = []
-    for summary_path in sorted(input_dir.glob("*/detector_validation_summary.csv")):
+    for summary_path in find(input_dir, "detector_validation_summary.csv"):
         frame = pd.read_csv(summary_path)
         frame["run_folder"] = summary_path.parent.name
         frames.append(frame)
     if not frames:
-        raise SystemExit(f"No detector_validation_summary.csv found under {input_dir}/*/")
+        raise SystemExit(f"No detector_validation_summary.csv found in {input_dir} or its sub-folders")
     return pd.concat(frames, ignore_index=True)
 
 
 def load_reduction(input_dir: Path) -> pd.DataFrame | None:
-    matches = sorted(input_dir.glob("*/reduction_comparison.csv"))
+    matches = find(input_dir, "reduction_comparison.csv")
     if not matches:
         return None
     return pd.concat((pd.read_csv(path) for path in matches), ignore_index=True)
@@ -62,7 +75,7 @@ def load_reduction(input_dir: Path) -> pd.DataFrame | None:
 
 def load_raws(input_dir: Path) -> pd.DataFrame | None:
     frames = []
-    for raw_path in sorted(input_dir.glob("*/detector_validation_raw.csv")):
+    for raw_path in find(input_dir, "detector_validation_raw.csv"):
         frame = pd.read_csv(raw_path)
         frame["run_folder"] = raw_path.parent.name
         frames.append(frame)
@@ -216,6 +229,10 @@ def chart_reduction_two_panel(summary_by: pd.DataFrame, group_col: str, title: s
 
     plot_df = summary_by.set_index(group_col)[["baseline_score", "refined_score"]]
     plot_df.plot(kind="bar", ax=ax1, rot=25)
+    top = plot_df.max().max()
+    if pd.notna(top) and top > 0:
+        ax1.set_ylim(0, top * 1.3)  # headroom so the legend never covers a bar
+    ax1.legend(loc="upper right", ncol=2)
     ax1.set_ylabel("SelfCheckGPT hallucination score (lower = better)")
     ax1.set_title(f"{title}: baseline vs. refined")
 
@@ -244,6 +261,40 @@ def to_markdown_table(frame: pd.DataFrame) -> str:
     return "\n".join([header, divider, *rows])
 
 
+def run_details(input_dir: Path) -> list[str]:
+    """Markdown lines describing what produced each run: command, commit,
+    duration, dataset checksums and model digests (from run_manifest.json)."""
+    lines = []
+    for path in find(input_dir, "run_manifest.json"):
+        m = json.loads(path.read_text(encoding="utf-8"))
+        where = "" if path.parent == input_dir else f" — `{path.parent.name}`"
+        git = m.get("git", {})
+        lines += [
+            f"### Run details{where}",
+            "",
+            f"- command: `{m.get('command')}`",
+            f"- started {m.get('started_at')}, took {m.get('duration_seconds')} s "
+            f"(stages: {m.get('stage_seconds')})",
+            f"- repository commit `{git.get('commit')}`"
+            + (" **with uncommitted changes**" if git.get("uncommitted_changes") else ""),
+            f"- seed {m.get('seed')}, Python {m.get('python')}, "
+            + ", ".join(f"{k} {v}" for k, v in m.get("packages", {}).items()),
+            "",
+        ]
+        if m.get("datasets"):
+            lines += ["| dataset | samples | sha256 |", "|---|---|---|"]
+            lines += [f"| {d['name']} | {d['n_samples']} | `{(d.get('sha256') or '—')[:16]}` |"
+                      for d in m["datasets"]]
+            lines.append("")
+        if m.get("models"):
+            lines += ["| model | tag | size | quant | digest |", "|---|---|---|---|---|"]
+            lines += [f"| {g['name']} | {g.get('model')} | {g.get('parameter_size') or '—'} | "
+                      f"{g.get('quantization') or '—'} | `{(g.get('digest') or '—')[:19]}` |"
+                      for g in m["models"]]
+            lines.append("")
+    return lines
+
+
 def write_report(
     input_dir: Path,
     summary: pd.DataFrame,
@@ -254,13 +305,13 @@ def write_report(
     chart_files: list[str],
 ) -> Path:
     lines = [
-        f"# Full run report — {input_dir.name}",
+        f"# Run report — {input_dir.name}",
         "",
-        "Aggregated by `scripts/generate_report.py` from each detector's own "
+        "Built by `scripts/generate_report.py` from the run's "
         "`detector_validation_summary.csv`/`detector_validation_raw.csv` (and "
-        "`reduction_comparison.csv` for SelfCheckGPT), each produced by a "
-        "separate `main.py` run in its own isolated venv. See "
-        "`docs/HOW_TO_RUN.md` for how this run was launched.",
+        "`reduction_comparison.csv` for SelfCheckGPT). A `scripts/run_full.py` "
+        "run combines one `main.py` run per detector, each in its own venv. "
+        "See `docs/HOW_TO_RUN.md`.",
         "",
         "Not a reportable research result on its own — no held-out split, "
         "confidence intervals, or human review yet (see `docs/REPRODUCIBILITY.md`). "
@@ -311,19 +362,22 @@ def write_report(
             to_markdown_table(reduction_by_dataset),
             "",
         ]
+    lines += ["## How this run was produced", "", *run_details(input_dir)]
     report_path = input_dir / "REPORT.md"
     report_path.write_text("\n".join(lines), encoding="utf-8")
     return report_path
 
 
-def main() -> None:
-    args = parse_args()
-    input_dir = Path(args.input)
+def generate(input_dir: Path) -> dict[str, Path]:
+    """Write every combined CSV, chart, and REPORT.md into `input_dir`;
+    return the produced files keyed by a short label."""
     charts_dir = input_dir / "charts"
     charts_dir.mkdir(parents=True, exist_ok=True)
+    produced: dict[str, Path] = {}
 
     summary = load_summaries(input_dir)
     summary.to_csv(input_dir / "combined_summary.csv", index=False)
+    produced["combined summary"] = input_dir / "combined_summary.csv"
 
     reduction = load_reduction(input_dir)
     reduction_by_model = pd.DataFrame()
@@ -331,6 +385,7 @@ def main() -> None:
     reduction_by_dataset_model = pd.DataFrame()
     if reduction is not None:
         reduction.to_csv(input_dir / "combined_reduction.csv", index=False)
+        produced["reduction rows"] = input_dir / "combined_reduction.csv"
         reduction_by_model = reduction_summary(reduction, ["model"])
         reduction_by_dataset = reduction_summary(reduction, ["dataset"])
         reduction_by_dataset_model = reduction_summary(reduction, ["dataset", "model"])
@@ -338,6 +393,7 @@ def main() -> None:
             reduction_by_dataset_model.to_csv(
                 input_dir / "combined_reduction_summary.csv", index=False
             )
+            produced["reduction summary"] = input_dir / "combined_reduction_summary.csv"
 
     raw = load_raws(input_dir)
     breakdown = None
@@ -345,6 +401,7 @@ def main() -> None:
         breakdown = per_dataset_breakdown(raw, threshold_map(summary))
         if not breakdown.empty:
             breakdown.to_csv(input_dir / "combined_per_dataset_breakdown.csv", index=False)
+            produced["per-dataset"] = input_dir / "combined_per_dataset_breakdown.csv"
 
     chart_files = [chart_detector_comparison(summary, charts_dir)]
     per_model_chart = chart_selfcheckgpt_per_model(summary, charts_dir)
@@ -366,20 +423,20 @@ def main() -> None:
     )
     if reduction_dataset_chart:
         chart_files.append(reduction_dataset_chart)
+    produced["charts"] = charts_dir
 
-    report_path = write_report(
+    produced["report"] = write_report(
         input_dir, summary, breakdown,
         reduction_by_model, reduction_by_dataset, reduction_by_dataset_model,
         chart_files,
     )
-    print(f"Combined summary: {input_dir / 'combined_summary.csv'}")
-    if breakdown is not None and not breakdown.empty:
-        print(f"Per-dataset breakdown: {input_dir / 'combined_per_dataset_breakdown.csv'}")
-    if reduction is not None:
-        print(f"Combined reduction (raw): {input_dir / 'combined_reduction.csv'}")
-        print(f"Combined reduction (summary): {input_dir / 'combined_reduction_summary.csv'}")
-    print(f"Charts: {charts_dir} ({len(chart_files)} PNG files)")
-    print(f"Report: {report_path}")
+    return produced
+
+
+def main() -> None:
+    args = parse_args()
+    for label, path in generate(Path(args.input)).items():
+        print(f"  {label:<18} {path}")
 
 
 if __name__ == "__main__":

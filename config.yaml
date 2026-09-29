@@ -28,6 +28,10 @@ models:
     provider: "ollama"
     model: "deepseek-r1:7b"
     auto_pull: false
+    # Reasoning models: without this the <think> trace would count toward
+    # max_tokens and could leave no final answer. Any <think> block that
+    # still appears is stripped before scoring (models/ollama_model.py).
+    think: false
 
   - name: "gemma3-4b"         # Google
     provider: "ollama"
@@ -38,6 +42,10 @@ models:
     provider: "ollama"
     model: "gpt-oss:20b"
     auto_pull: false
+    # gpt-oss cannot turn reasoning off, only down; its reasoning tokens
+    # share max_tokens with the answer, hence the larger budget.
+    think: "low"
+    max_tokens: 1024
 
 selected_models: ["llama3.2-3b", "qwen2.5-7b", "deepseek-r1-7b", "gemma3-4b", "gpt-oss-20b"]
 
@@ -46,7 +54,8 @@ selected_models: ["llama3.2-3b", "qwen2.5-7b", "deepseek-r1-7b", "gemma3-4b", "g
 # pool. Run `python scripts/prepare_halueval.py` once to fetch the official
 # files at the commit pinned in provenance/sources.yaml, then these three
 # load real, distinct rows — nothing here repeats past `max_samples` the way
-# `synthetic` below does once you exceed its small fixed pool.
+# `synthetic` below does once you exceed its small fixed pool. `max_samples`
+# is a random subset drawn with benchmark.seed, not the first N rows.
 datasets:
   - name: "halueval_qa"
     enabled: true
@@ -83,7 +92,7 @@ datasets:
     right_answer_col: "right_summary"
     hallucinated_answer_col: "hallucinated_summary"
 
-  # Small fixed pool (9 contexts) that repeats once max_samples exceeds it —
+  # Small fixed pool (8 contexts) that repeats once max_samples exceeds it —
   # engineering smoke data only, kept small on purpose. Do not report it as
   # a research result; the three HaluEval datasets above are the real data.
   - name: "synthetic"

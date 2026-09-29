@@ -50,12 +50,16 @@ class DetectorValidator:
         score_columns: Iterable[str],
         thresholds: dict[str, float],
     ) -> pd.DataFrame:
+        """One row per detector. `n_cases` counts scored cases; `n_failed`
+        counts cases whose score is missing because the detector or the
+        generator raised (details in the raw CSV's `<detector>_error`)."""
         rows = []
         for column in score_columns:
             usable = frame[["label", column]].dropna()
-            row = self.evaluate(
+            row = {"detector": column.removesuffix("_score")}
+            row.update(self.evaluate(
                 usable["label"], usable[column], thresholds[column]
-            )
-            row["detector"] = column.removesuffix("_score")
+            ))
+            row["n_failed"] = int(len(frame) - len(usable))
             rows.append(row)
         return pd.DataFrame(rows)

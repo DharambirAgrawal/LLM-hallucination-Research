@@ -30,14 +30,10 @@ def selfcheckgpt_smoke() -> None:
 
 
 def minicheck_smoke() -> None:
-    import nltk
-
     from detectors import MiniCheckDetector
+    from detectors.nltk_resources import ensure_sentence_tokenizer
 
-    # MiniCheck calls NLTK internally. New NLTK releases split the sentence
-    # tables into `punkt_tab`; older releases may still look for `punkt`.
-    for resource in ("punkt", "punkt_tab"):
-        nltk.download(resource, quiet=True)
+    ensure_sentence_tokenizer()  # MiniCheck calls nltk.sent_tokenize
     detector = MiniCheckDetector(cache_dir="/content/minicheck-checkpoints")
     print("MiniCheck official Flan-T5-Large")
     print("  factual risk:", detector.detect(CONTEXT, FACTUAL).score)
@@ -46,7 +42,9 @@ def minicheck_smoke() -> None:
 
 def summac_smoke() -> None:
     from detectors import SummaCDetector
+    from detectors.nltk_resources import ensure_sentence_tokenizer
 
+    ensure_sentence_tokenizer()  # SummaC calls nltk.sent_tokenize
     detector = SummaCDetector(model_name="vitc")
     print("SummaC official Conv-VitC")
     print("  factual risk:", detector.detect(CONTEXT, FACTUAL).score)
@@ -55,7 +53,9 @@ def summac_smoke() -> None:
 
 def alignscore_smoke(checkpoint: str) -> None:
     from detectors import AlignScoreDetector
+    from detectors.nltk_resources import ensure_sentence_tokenizer
 
+    ensure_sentence_tokenizer()  # AlignScore calls nltk.sent_tokenize
     detector = AlignScoreDetector(checkpoint_path=checkpoint)
     print("AlignScore official checkpoint")
     print("  factual risk:", detector.detect(CONTEXT, FACTUAL).score)
