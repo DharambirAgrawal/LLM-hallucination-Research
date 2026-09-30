@@ -1,0 +1,12 @@
+# Shared by every environment: orchestration, data, metrics, reports.
+# Contains no detector package or model.
+ollama>=0.5.0          # `think` support for reasoning models
+pyyaml>=6.0
+pandas>=2.2.0
+numpy>=1.26.0
+scikit-learn>=1.4.0
+tqdm>=4.66.0
+loguru>=0.7.2
+matplotlib>=3.8.0
+python-docx>=1.1.0     # report.docx
+pyarrow>=15.0.0        # HaluBench is distributed as parquet

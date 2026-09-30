@@ -1,0 +1,6 @@
+# Isolated venv for SummaC (installed by scripts/run_full.py).
+# Pinned to the commit reviewed in provenance/sources.yaml. The PyPI release
+# (summac==0.0.4) is older than that commit and pins huggingface-hub<=0.17,
+# so a bare `pip install summac` would not run the reviewed code.
+-r base.txt
+summac @ git+https://github.com/tingofurro/summac.git@c1f3da93cd074c24d8033eb27a88b5a7cc5c08fa

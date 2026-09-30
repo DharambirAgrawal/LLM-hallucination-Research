@@ -100,6 +100,23 @@ def progress(iterable: Iterable, desc: str, total: Optional[int] = None, unit: s
     )
 
 
+def download_bar(desc: str, total: Optional[int]):
+    """Byte-sized progress bar for downloads and Ollama pulls."""
+    return tqdm(
+        total=total,
+        desc=f"  ↓ {desc}",
+        unit="B",
+        unit_scale=True,
+        unit_divisor=1024,
+        file=sys.stderr,
+        dynamic_ncols=True,
+        mininterval=0.5 if _IS_TTY else 30,
+        bar_format="{desc} {percentage:3.0f}%|{bar:24}| {n_fmt}/{total_fmt} "
+                   "[{elapsed}<{remaining}, {rate_fmt}]",
+        leave=False,
+    )
+
+
 def duration(seconds: float) -> str:
     seconds = int(round(seconds))
     hours, rest = divmod(seconds, 3600)

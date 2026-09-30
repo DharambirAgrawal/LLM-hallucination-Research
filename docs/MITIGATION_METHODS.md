@@ -1,18 +1,25 @@
 # Reduction-method decision record
 
-One local-inspired baseline is active: a generic-QA adaptation of Self-Refine
-(`reducers/self_refine.py`). It is **not** an upstream reproduction — see the
-"Active integration" section below before reporting any result from it. No
-other candidate is integrated. This distinction (local inspired baseline vs.
-upstream reproduction vs. provider baseline) is intentional: the previous
-context prompting, sampling, and self-critique files were local baselines and
-were removed because they could be mistaken for verified implementations of
-published methods.
+Five reduction methods are compared with the grounded baseline answer (see
+[`METHOD_SOURCES.md`](../METHOD_SOURCES.md#reduction-stage-b) for the full
+table). What each one is, exactly:
+
+- `uqlm_best_response`: **official** UQLM implementation.
+- `self_refine_adapted`: **local inspired adaptation** of Self-Refine (below).
+- `cove_adapted`: **local implementation** of Chain-of-Verification; the
+  paper released no code ([`reducers/cove.py`](../reducers/cove.py)).
+- `closed_book`: an ablation (no context), measuring what RAG adds.
+- `greedy`: a decoding setting (temperature 0), not a published method.
+
+Every output row carries this in its `reproduction_status` column, so a
+results table can never present a local implementation as a reproduction.
 
 ## Candidates from verified sources
 
 | Method | Verified source | Integration decision |
 |---|---|---|
+| Chain-of-Verification | Paper only (Dhuliawala et al., 2023); no code released | **Integrated as a local implementation** of the paper's factored 4-step method. |
+| UQLM best-response selection | `cvs-health/uqlm` v0.6.6, Apache-2.0 | **Integrated, official implementation** (`SemanticEntropy(use_best=True)`). |
 | Self-Refine | `madaan/self-refine`, Apache-2.0, pinned in the source register | **Integrated as a local inspired baseline**, not an upstream reproduction — see below. The upstream code is task-specific; adapting it into a generic QA loop changes prompts and behavior. |
 | Self-RAG | `AkariAsai/self-rag`, published implementation | Reference only. It requires its trained model/checkpoints and special reflection tokens; it cannot be plugged into an arbitrary API model. |
 | RARR | `anthonywchen/RARR`, pinned in the source register | Do not vendor. No license is declared at the repository root, and the original workflow depends on search/API infrastructure. |
@@ -42,10 +49,11 @@ upstream repository. Per `docs/REPRODUCIBILITY.md` Stage C, report this as a
 **local inspired baseline**, a separate condition from any future upstream
 reproduction, provider baseline, or the project's own proposed method.
 
-Current scope limits: only SelfCheckGPT can score the before/after pair
-today (`benchmark/reduction_runner.py` rejects any other detector), and the
-comparison is a paired smoke run — not the bootstrap-CI, held-out, human-
-reviewed Stage B protocol described in `docs/REPRODUCIBILITY.md`.
+Scope: every enabled detector scores every method's answer (MiniCheck,
+SummaC and AlignScore from their own environments, see
+`scripts/run_full.py`); the comparison is paired per question and model, but
+it is not yet the bootstrap-CI, held-out, human-reviewed Stage B protocol
+described in `docs/REPRODUCIBILITY.md`.
 
 ## Research sequence
 

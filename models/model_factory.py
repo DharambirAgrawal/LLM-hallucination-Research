@@ -1,7 +1,7 @@
 """
 ModelFactory
 ============
-Builds local Ollama or remote OpenAI-compatible models from config.yaml.
+Builds the local Ollama models listed in config.yaml.
 
 - selected_models: []  → every entry under `models:` (skipping Ollama tags
   that are not pulled)
@@ -16,18 +16,66 @@ from loguru import logger
 
 from models.base_model import BaseModel
 from models.ollama_model import OllamaModel
-from models.openai_compatible_model import OpenAICompatibleModel
-from models.transformers_model import TransformersModel
 
 
 class ModelFactory:
 
     @staticmethod
+    def active_configs(config: dict) -> List[dict]:
+        selected = set(config.get("selected_models") or [])
+        return [
+            cfg for cfg in config.get("models", [])
+            if not selected or cfg.get("name") in selected
+        ]
+
+    @staticmethod
+    def ensure_ollama_models(config: dict, dry_run: bool = False,
+                             include_generators: bool = True, extra_tags: List[str] = ()) -> None:
+        """Pull every selected Ollama model that is not on the server yet.
+
+        `ollama.auto_pull` (default true) or a model's own `auto_pull`
+        turns this off; a model that is still missing is then skipped by
+        build_all with a warning.
+        """
+        from utils import console
+
+        ollama_cfg = config.get("ollama", {})
+        host = ollama_cfg.get("host", "http://localhost:11434")
+        wanted = [c for c in ModelFactory.active_configs(config)
+                  if c.get("provider", "ollama") == "ollama"] if include_generators else []
+        wanted += [{"name": "judge", "model": tag} for tag in extra_tags
+                   if tag and tag not in {c["model"] for c in wanted}]
+        if not wanted:
+            return
+        installed = OllamaModel.installed_details(host)
+        if not installed and not OllamaModel.server_reachable(host):
+            raise SystemExit(
+                f"\nCannot reach Ollama at {host}. Start it (`ollama serve`) or "
+                "fix `ollama.host` in the config."
+            )
+        for cfg in wanted:
+            name, tag = cfg["name"], cfg["model"]
+            if tag in installed or f"{tag}:latest" in installed:
+                if dry_run:
+                    info = installed.get(tag) or installed.get(f"{tag}:latest") or {}
+                    console.line(f"✓ {name:<16} {tag}  ({info.get('parameter_size') or '?'}) present")
+                continue
+            if not cfg.get("auto_pull", ollama_cfg.get("auto_pull", True)):
+                console.line(f"✗ {name:<16} {tag} is not pulled and auto_pull is off")
+                continue
+            if dry_run:
+                console.line(f"↓ {name:<16} {tag} will be pulled from ollama.com")
+                continue
+            try:
+                OllamaModel.pull(host, tag)
+                console.line(f"✓ {name:<16} {tag} pulled")
+            except Exception as exc:
+                logger.warning(f"Could not pull {tag}: {exc}")
+
+    @staticmethod
     def build_all(config: dict) -> List[BaseModel]:
         """
-        Return model adapters based on config. Local Ollama models are checked
-        for availability; remote endpoints are registered without making a
-        network call until generation starts.
+        Return an adapter for every selected model that the Ollama server has.
         """
         ollama_cfg  = config.get("ollama", {})
         host        = ollama_cfg.get("host", "http://localhost:11434")
@@ -59,22 +107,9 @@ class ModelFactory:
             tag  = cfg["model"]
             provider = cfg.get("provider", "ollama")
 
-            if provider == "openai_compatible":
-                try:
-                    models.append(OpenAICompatibleModel(name=name, config=cfg))
-                    logger.debug(f"Registered remote endpoint: {name}")
-                except Exception as e:
-                    logger.error(f"Cannot register '{name}': {e}")
-                continue
-            if provider == "transformers":
-                try:
-                    models.append(TransformersModel(name=name, config=cfg))
-                    logger.debug(f"Registered local Transformers model: {name}")
-                except Exception as e:
-                    logger.error(f"Cannot register '{name}': {e}")
-                continue
             if provider != "ollama":
-                logger.error(f"Unknown model provider '{provider}' for '{name}'")
+                logger.error(f"Unsupported model provider '{provider}' for '{name}' "
+                             "(only local Ollama models are supported)")
                 continue
 
             # Exact tag match only ("llama3" also matches "llama3:latest").
@@ -82,7 +117,7 @@ class ModelFactory:
             installed_tag = next(
                 (t for t in (tag, f"{tag}:latest") if t in installed), None
             )
-            if installed_tag is None and not cfg.get("auto_pull", False):
+            if installed_tag is None:
                 if installed:
                     logger.warning(
                         f"Skipping {name}: '{tag}' is not pulled in Ollama "

@@ -59,12 +59,9 @@ class AlignScoreDetector:
 
     def detect(self, context: str, answer: str) -> AlignScoreDetectionResult:
         self._load()
-        if not context or not answer:
-            factuality = 0.0
-        else:
-            factuality = float(
-                self._model.score(contexts=[context], claims=[answer])[0]
-            )
+        if not context.strip() or not answer.strip():
+            raise ValueError("empty context or answer cannot be scored")
+        factuality = float(self._model.score(contexts=[context], claims=[answer])[0])
         factuality = max(0.0, min(1.0, factuality))
         score = 1.0 - factuality
         return AlignScoreDetectionResult(

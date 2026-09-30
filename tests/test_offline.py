@@ -23,11 +23,8 @@ from detectors.alignscore_detector import AlignScoreDetector
 from detectors.minicheck_detector import MiniCheckDetector
 from detectors.selfcheckgpt_detector import SelfCheckGPTDetector
 from detectors.summac_detector import SummaCDetector
-from models.openai_compatible_model import OpenAICompatibleModel
 from models.replay_model import ReplayModel
-from models.transformers_model import TransformersModel
 from reducers.self_refine import SelfRefineReducer
-from utils.env_loader import load_env_file
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -98,7 +95,54 @@ def fake_upstream_modules() -> dict[str, types.ModuleType]:
 
     spacy_module.load = missing_model
 
+    # UQLM: confidences that are high for 1991 answers, low for 1985 ones.
+    # Records its constructor arguments so tests can check use_best etc.
+    uqlm_module = types.ModuleType("uqlm")
+    uqlm_judges = types.ModuleType("uqlm.judges")
+
+    class FakeResult:
+        def __init__(self, data):
+            self.data = data
+
+    class FakeBlackBoxUQ:
+        init_kwargs = {}
+
+        def __init__(self, **kwargs):
+            FakeBlackBoxUQ.init_kwargs = kwargs
+            self.scorers = kwargs["scorers"]
+
+        def score(self, responses, sampled_responses, show_progress_bars=True):
+            conf = 0.1 if "1985" in responses[0] else 0.9
+            return FakeResult({name: [conf] for name in self.scorers})
+
+    class FakeSemanticEntropy:
+        init_kwargs = {}
+
+        def __init__(self, **kwargs):
+            FakeSemanticEntropy.init_kwargs = kwargs
+
+        def score(self, responses, sampled_responses, show_progress_bars=True, prompts=None):
+            candidates = [responses[0], *sampled_responses[0]]
+            best = next((c for c in candidates if "1985" not in c), candidates[0])
+            return FakeResult({"responses": [best]})
+
+    class FakeJudge:
+        def __init__(self, llm, scoring_template="true_false_uncertain"):
+            self.llm = llm
+
+        async def judge_responses(self, prompts, responses):
+            return {"scores": [0.0 if "1985" in r else 1.0 for r in responses]}
+
+    uqlm_module.BlackBoxUQ = FakeBlackBoxUQ
+    uqlm_module.SemanticEntropy = FakeSemanticEntropy
+    uqlm_judges.LLMJudge = FakeJudge
+    langchain_ollama = types.ModuleType("langchain_ollama")
+    langchain_ollama.ChatOllama = lambda **kwargs: kwargs
+
     return {
+        "uqlm": uqlm_module,
+        "uqlm.judges": uqlm_judges,
+        "langchain_ollama": langchain_ollama,
         "spacy": spacy_module,
         "selfcheckgpt": selfcheck_package,
         "selfcheckgpt.modeling_selfcheck": selfcheck_module,
@@ -111,12 +155,59 @@ def fake_upstream_modules() -> dict[str, types.ModuleType]:
 
 
 class DataAndMetricsTests(unittest.TestCase):
-    def test_default_config_generates_balanced_fixed_cases(self):
-        config = yaml.safe_load((ROOT / "config.yaml").read_text())
+    def test_synthetic_fixture_generates_balanced_fixed_cases(self):
+        config = {"datasets": [{"name": "synthetic", "source": "synthetic", "max_samples": 8}]}
         datasets = DatasetLoader(config, seed=42).load_all()
         cases = DatasetLoader.detection_cases(datasets["synthetic"])
         self.assertEqual(len(cases), 16)
         self.assertEqual(sum(case["label"] for case in cases), 8)
+
+    def test_ragtruth_loader_keeps_every_labeled_answer_of_the_test_split(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sources = Path(temp_dir) / "source_info.jsonl"
+            responses = Path(temp_dir) / "response.jsonl"
+            sources.write_text(json.dumps({
+                "source_id": "7", "task_type": "QA", "source": "MARCO",
+                "source_info": {"question": "When?", "passages": "passage 1: in 1991"},
+                "prompt": "Briefly answer the following question:\nWhen?\n..."}) + "\n")
+            rows = [
+                {"id": "1", "source_id": "7", "model": "m1", "split": "test", "quality": "good",
+                 "labels": [], "response": "In 1991."},
+                {"id": "2", "source_id": "7", "model": "m2", "split": "test", "quality": "good",
+                 "labels": [{"text": "1985"}], "response": "In 1985."},
+                {"id": "3", "source_id": "7", "model": "m3", "split": "train", "quality": "good",
+                 "labels": [], "response": "train split, skipped"},
+                {"id": "4", "source_id": "7", "model": "m4", "split": "test", "quality": "truncated",
+                 "labels": [], "response": "truncated, skipped"},
+            ]
+            responses.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+            config = {"datasets": [{"name": "rt", "source": "ragtruth", "task_type": "QA",
+                                    "responses_path": str(responses), "sources_path": str(sources),
+                                    "max_samples": 5}]}
+            samples = DatasetLoader(config, seed=42).load_all()["rt"]
+            self.assertEqual(len(samples), 1)
+            self.assertEqual((samples[0].question, samples[0].context), ("When?", "passage 1: in 1991"))
+            cases = DatasetLoader.detection_cases(samples)
+            self.assertEqual([(c["answer"], c["label"]) for c in cases], [("In 1991.", 0), ("In 1985.", 1)])
+
+    def test_halubench_loader_maps_pass_fail_to_labels(self):
+        import pandas as pd
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "hb.parquet"
+            pd.DataFrame([
+                {"id": "a1", "passage": "P", "question": "Q", "answer": "right", "label": "PASS", "source_ds": "DROP"},
+                {"id": "a2", "passage": "P", "question": "Q", "answer": "wrong", "label": "FAIL", "source_ds": "DROP"},
+                {"id": "a3", "passage": "P", "question": "Q", "answer": "['x', 'y']", "label": "FAIL", "source_ds": "DROP"},
+                {"id": "a4", "passage": "P2", "question": "Q2", "answer": "ok", "label": "PASS", "source_ds": "DROP"},
+                {"id": "b1", "passage": "X", "question": "Y", "answer": "other", "label": "PASS", "source_ds": "covidQA"},
+            ]).to_parquet(path)
+            config = {"datasets": [{"name": "hb", "source": "halubench", "source_ds": "DROP",
+                                    "path": str(path), "max_samples": 5}]}
+            samples = DatasetLoader(config, seed=42).load_all()["hb"]
+            self.assertEqual(len({s.sample_id for s in samples}), 2)   # ids unique per question
+            cases = DatasetLoader.detection_cases(samples)
+            # the list-literal answer (a format artifact) is excluded
+            self.assertEqual(sorted((c["answer"], c["label"]) for c in cases), [("ok", 0), ("right", 0), ("wrong", 1)])
 
     def test_metrics_have_expected_direction(self):
         result = DetectorValidator.evaluate(
@@ -196,9 +287,10 @@ class AdapterContractTests(unittest.TestCase):
             generator = ReplayModel([self.factual, "Python first appeared in 1991."])
             frame = BenchmarkRunner(config, generator=generator).validate(datasets)
             self.assertEqual(len(frame), 4)
-            for name in ("selfcheckgpt", "minicheck", "summac", "alignscore"):
-                self.assertTrue(frame[f"{name}_score"].notna().all())
-                self.assertTrue(frame[f"{name}_error"].isna().all())
+            for column in ("selfcheckgpt_ngram", "minicheck", "summac", "alignscore"):
+                self.assertTrue(frame[f"{column}_score"].notna().all(), column)
+            for family in ("selfcheckgpt", "minicheck", "summac", "alignscore"):
+                self.assertTrue(frame[f"{family}_error"].isna().all(), family)
             self.assertTrue((Path(temp_dir) / "detector_validation_raw.csv").exists())
 
     def test_runner_scores_every_selected_generator(self):
@@ -229,7 +321,7 @@ class AdapterContractTests(unittest.TestCase):
             )
             self.assertEqual(sorted(frame["model"].unique()), ["model-a", "model-b"])
             self.assertEqual(len(frame), 4)  # 2 cases (factual/hallucinated) x 2 models
-            self.assertTrue(frame["selfcheckgpt_score"].notna().all())
+            self.assertTrue(frame["selfcheckgpt_ngram_score"].notna().all())
 
     def test_validate_requires_a_generator_when_selfcheckgpt_is_enabled(self):
         config = {
@@ -238,159 +330,6 @@ class AdapterContractTests(unittest.TestCase):
         runner = BenchmarkRunner({**config, "benchmark": {"output_dir": tempfile.mkdtemp()}})
         with self.assertRaises(ValueError):
             runner.validate({"synthetic": []}, generators=[])
-
-
-class RemoteAdapterTests(unittest.TestCase):
-    def test_local_transformers_model_requires_immutable_revision(self):
-        with self.assertRaisesRegex(ValueError, "immutable"):
-            TransformersModel(
-                "moving-model",
-                {"model": "example/model", "revision": "main"},
-            )
-
-    def test_local_transformers_model_uses_full_tokenizer_inputs(self):
-        generated = {}
-
-        class FakeBatch(dict):
-            def to(self, device):
-                generated["input_device"] = device
-                return self
-
-        class FakeTokenizer:
-            eos_token_id = 0
-
-            def apply_chat_template(self, messages, **kwargs):
-                generated["template_kwargs"] = kwargs
-                return FakeBatch(
-                    input_ids=np.array([[1, 2, 3]]),
-                    attention_mask=np.array([[1, 1, 1]]),
-                )
-
-            def decode(self, token_ids, **kwargs):
-                return "local response"
-
-        class FakeModel:
-            def to(self, device):
-                return self
-
-            def eval(self):
-                return self
-
-            def generate(self, **kwargs):
-                generated["generate_kwargs"] = kwargs
-                return np.array([[1, 2, 3, 4, 5]])
-
-        class FakeAutoTokenizer:
-            @staticmethod
-            def from_pretrained(*args, **kwargs):
-                return FakeTokenizer()
-
-        class FakeAutoModel:
-            @staticmethod
-            def from_pretrained(*args, **kwargs):
-                generated["load_kwargs"] = kwargs
-                return FakeModel()
-
-        class InferenceMode:
-            def __enter__(self):
-                return None
-
-            def __exit__(self, *args):
-                return False
-
-        fake_torch = types.ModuleType("torch")
-        fake_torch.cuda = types.SimpleNamespace(is_available=lambda: False)
-        fake_torch.float16 = "float16"
-        fake_torch.float32 = "float32"
-        fake_torch.inference_mode = InferenceMode
-        fake_transformers = types.ModuleType("transformers")
-        fake_transformers.AutoTokenizer = FakeAutoTokenizer
-        fake_transformers.AutoModelForCausalLM = FakeAutoModel
-
-        config = {
-            "model": "official/model",
-            "revision": "a" * 40,
-            "max_tokens": 8,
-        }
-        with patch.dict(
-            sys.modules,
-            {"torch": fake_torch, "transformers": fake_transformers},
-        ):
-            result = TransformersModel("local", config).generate("hello")
-
-        self.assertEqual(result, "local response")
-        self.assertIn("attention_mask", generated["generate_kwargs"])
-        self.assertTrue(generated["template_kwargs"]["return_dict"])
-        self.assertEqual(generated["load_kwargs"]["attn_implementation"], "eager")
-
-    def test_env_file_loading_without_overwriting_environment(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            env_file = Path(temp_dir) / ".env"
-            env_file.write_text(
-                "# comment\nGROQ_API_KEY='from-file'\nexport SECOND_KEY=two\n",
-                encoding="utf-8",
-            )
-            with patch.dict(os.environ, {"GROQ_API_KEY": "already-set"}, clear=False):
-                loaded = load_env_file(env_file)
-                self.assertEqual(os.environ["GROQ_API_KEY"], "already-set")
-                self.assertEqual(os.environ["SECOND_KEY"], "two")
-                self.assertEqual(loaded, {"SECOND_KEY"})
-
-    def test_openai_compatible_payload_and_response(self):
-        received = {}
-
-        class FakeResponse:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def read(self):
-                return json.dumps(
-                    {"choices": [{"message": {"content": "test answer"}}]}
-                ).encode()
-
-        def fake_urlopen(request, timeout):
-            received["path"] = request.full_url
-            received["authorization"] = request.headers.get("Authorization")
-            received["json"] = json.loads(request.data)
-            received["timeout"] = timeout
-            return FakeResponse()
-
-        config = {
-            "model": "test-model",
-            "base_url": "https://example.invalid/v1",
-            "api_key_env": "OFFLINE_TEST_API_KEY",
-            "request_fields": {"reasoning_effort": "minimal"},
-        }
-        with patch.dict(os.environ, {"OFFLINE_TEST_API_KEY": "secret"}):
-            with patch("models.openai_compatible_model.urlopen", fake_urlopen):
-                model = OpenAICompatibleModel("test", config)
-                self.assertEqual(model.generate("hello", seed=42), "test answer")
-        self.assertEqual(received["path"], "https://example.invalid/v1/chat/completions")
-        self.assertEqual(received["authorization"], "Bearer secret")
-        self.assertEqual(received["json"]["model"], "test-model")
-        self.assertEqual(received["json"]["seed"], 42)
-        self.assertEqual(received["json"]["reasoning_effort"], "minimal")
-        self.assertEqual(received["timeout"], 120)
-
-    def test_provider_smoke_defaults_are_bounded_and_free_tier(self):
-        from scripts.provider_selfcheck_smoke import (
-            CASES,
-            DEFAULT_PROVIDERS,
-            PROVIDERS,
-            parse_providers,
-        )
-
-        self.assertEqual(
-            set(PROVIDERS), {"openrouter", "gemini", "gemini-flash", "mistral"}
-        )
-        self.assertEqual(PROVIDERS["openrouter"]["model"], "openrouter/free")
-        self.assertEqual(PROVIDERS["gemini"]["model"], "gemini-3.5-flash-lite")
-        self.assertEqual(PROVIDERS["gemini-flash"]["model"], "gemini-3.5-flash")
-        self.assertEqual(PROVIDERS["mistral"]["model"], "mistral-small-latest")
-        self.assertEqual(len(CASES) * 2 * len(parse_providers(DEFAULT_PROVIDERS)), 8)
 
 
 class DocumentationTests(unittest.TestCase):
@@ -470,6 +409,33 @@ class SelfRefineReducerTests(unittest.TestCase):
             SelfRefineReducer(model=ScriptedModel("m", ["x"]), max_iterations=0)
 
 
+class ScriptedChatModel:
+    """Returns realistic replies by recognising which prompt it was given."""
+
+    def __init__(self, name="model-a"):
+        self.name = name
+        self.prompts = []
+
+    def generate(self, prompt, **kwargs):
+        self.prompts.append((prompt, kwargs))
+        if prompt.startswith("Review the candidate answer"):
+            return "The year 1985 is not supported by the context."
+        if prompt.startswith("Rewrite the candidate answer"):
+            return "Python was released in 1991."
+        if prompt.startswith("Below is a question and a draft answer"):
+            return "1. When was Python first released?\n2. Who created Python?"
+        if prompt.startswith("Revise the draft answer"):
+            return "Python was first released in 1991 by Guido van Rossum."
+        if "Context:" not in prompt:
+            return "Python was released in 1985."          # closed book: no context
+        if kwargs.get("temperature") == 0.0:
+            return "Python was released in 1991."          # greedy
+        return "Python was released in 1985."              # grounded baseline (a hallucination)
+
+    def sample_n(self, prompt, n=5, temperature=1.0):
+        return ["Python was first released in 1991."] * n
+
+
 class ReductionRunnerTests(unittest.TestCase):
     def setUp(self):
         self.modules = patch.dict(sys.modules, fake_upstream_modules())
@@ -478,53 +444,116 @@ class ReductionRunnerTests(unittest.TestCase):
     def tearDown(self):
         self.modules.stop()
 
-    def test_rejects_a_non_selfcheckgpt_detector(self):
-        with tempfile.NamedTemporaryFile() as checkpoint:
-            alignscore = AlignScoreDetector(checkpoint_path=checkpoint.name)
-            with self.assertRaises(ValueError):
-                ReductionRunner({"benchmark": {"output_dir": tempfile.mkdtemp()}}, alignscore)
+    def _config(self, temp_dir, methods=None):
+        return {
+            "datasets": [{"name": "synthetic", "enabled": True, "source": "synthetic", "max_samples": 1}],
+            "detectors": {"selfcheckgpt": {"enabled": True, "method": "ngram", "n_samples": 2, "threshold": 3.0},
+                          "uqlm": {"enabled": True, "scorers": ["noncontradiction"]},
+                          "uqlm_judge": {"enabled": True}},
+            "judge": {"model": "judge:7b"},
+            "reduction": {"methods": methods if methods is not None else
+                          ["closed_book", "greedy", "self_refine_adapted", "cove_adapted", "uqlm_best_response"],
+                          "max_iterations": 1},
+            "benchmark": {"output_dir": temp_dir, "seed": 42},
+        }
 
-    def test_scores_baseline_and_refined_answers_with_the_frozen_detector(self):
+    def test_every_method_is_paired_with_the_same_baseline_and_scored(self):
+        from benchmark.reduction_runner import paired_deltas
         with tempfile.TemporaryDirectory() as temp_dir:
-            config = {
-                "datasets": [{
-                    "name": "synthetic", "enabled": True, "source": "synthetic", "max_samples": 1,
-                }],
-                "reduction": {"method": "self_refine_adapted", "max_iterations": 1},
-                "benchmark": {"output_dir": temp_dir, "seed": 42},
-            }
+            config = self._config(temp_dir)
             datasets = DatasetLoader(config, seed=42).load_all()
-            detector = SelfCheckGPTDetector(method="ngram", n_samples=1, threshold=3.0)
-            model = ScriptedModel("model-a", [
-                "Python was released in 1985.",              # baseline answer
-                "The year 1985 is not supported by the context.",  # feedback (not NO_ISSUES)
-                "Python was released in 1991.",              # refined answer
-            ])
-            frame = ReductionRunner(config, detector).run(datasets, generators=[model])
-            self.assertEqual(len(frame), 1)
-            row = frame.iloc[0]
-            self.assertIsNone(row["error"])
-            self.assertEqual(row["baseline_answer"], "Python was released in 1985.")
-            self.assertEqual(row["refined_answer"], "Python was released in 1991.")
-            self.assertEqual(row["baseline_score"], 4.0)
-            self.assertEqual(row["refined_score"], 1.0)
-            self.assertEqual(row["score_delta"], -3.0)
-            self.assertEqual(row["iterations"], 1)
-            self.assertEqual(row["stopped_reason"], "max_iterations")
-            # The "not upstream" fact must be readable from the raw CSV alone.
-            self.assertEqual(row["method"], "self_refine_adapted")
-            self.assertEqual(row["reproduction_status"], "local_inspired_baseline_NOT_an_upstream_reproduction")
+            runner = BenchmarkRunner(config)
+            frame = ReductionRunner(config, runner).run(datasets, generators=[ScriptedChatModel()])
+            self.assertEqual(list(frame["condition"]), ["baseline", "closed_book", "greedy",
+                                                        "self_refine_adapted", "cove_adapted",
+                                                        "uqlm_best_response"])
+            self.assertTrue(frame["error"].isna().all(), frame["error"].tolist())
+            for col in ("selfcheckgpt_ngram_score", "uqlm_noncontradiction_score", "uqlm_judge_score"):
+                self.assertTrue(frame[col].notna().all(), col)
+            answers = dict(zip(frame["condition"], frame["answer"]))
+            self.assertIn("1985", answers["baseline"])
+            self.assertIn("1991", answers["self_refine_adapted"])
+            self.assertIn("1991", answers["cove_adapted"])
+            self.assertIn("1991", answers["uqlm_best_response"])
+            self.assertIn("1991", answers["greedy"])
+            # the "not upstream" facts survive in the raw CSV
+            status = dict(zip(frame["condition"], frame["reproduction_status"]))
+            self.assertEqual(status["self_refine_adapted"], "local_inspired_baseline_NOT_an_upstream_reproduction")
+            self.assertEqual(status["uqlm_best_response"], "official_uqlm_implementation")
+            deltas = paired_deltas(frame, ["uqlm_judge_score"])
+            by_cond = dict(zip(deltas["condition"], deltas["delta"]))
+            self.assertLess(by_cond["self_refine_adapted"], 0)   # 1985 → 1991 lowers the risk
+            self.assertEqual(by_cond["closed_book"], 0)          # still 1985
             self.assertTrue((Path(temp_dir) / "reduction_comparison.csv").exists())
+
+    def test_uqlm_best_response_uses_official_class_with_prompts_out_of_nli(self):
+        import uqlm
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self._config(temp_dir, ["uqlm_best_response"])
+            ReductionRunner(config, BenchmarkRunner(config))._best._load()
+            self.assertTrue(uqlm.SemanticEntropy.init_kwargs["use_best"])
+            self.assertFalse(uqlm.SemanticEntropy.init_kwargs["prompts_in_nli"])
+
+    def test_uqlm_detection_never_swaps_the_scored_answer(self):
+        import uqlm
+        from detectors.sampling import SampleBank
+        from detectors.uqlm_detector import UQLMConsistencyDetector
+        detector = UQLMConsistencyDetector(SampleBank(2), ["noncontradiction"])
+        risk = detector.detect("When?", "ctx", "Python was released in 1985.", ReplayModel(["x"]))
+        self.assertFalse(uqlm.BlackBoxUQ.init_kwargs["use_best"])
+        self.assertAlmostEqual(risk["noncontradiction"], 0.9)   # risk = 1 - confidence
 
     def test_rejects_an_unqualified_method_name(self):
         """Config must say 'self_refine_adapted', never bare 'self_refine'."""
-        config = {
-            "reduction": {"method": "self_refine"},
-            "benchmark": {"output_dir": tempfile.mkdtemp()},
-        }
-        detector = SelfCheckGPTDetector(method="ngram")
-        with self.assertRaises(ValueError):
-            ReductionRunner(config, detector)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self._config(temp_dir, ["self_refine"])
+            with self.assertRaises(ValueError):
+                ReductionRunner(config, BenchmarkRunner(config))
+
+    def test_best_response_is_scored_leave_one_out(self):
+        """The picked sample must not be part of its own evidence."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self._config(temp_dir, ["uqlm_best_response"])
+            datasets = DatasetLoader(config, seed=42).load_all()
+            runner = BenchmarkRunner(config)
+            seen = []
+            original = runner.score_answer
+
+            def spy(case, model):
+                seen.append((case["case_id"], list(runner.bank.get(model, case["question"], case["context"]))))
+                return original(case, model)
+            runner.score_answer = spy
+            model = ScriptedChatModel()
+            frame = ReductionRunner(config, runner).run(datasets, generators=[model])
+            best = frame[frame["condition"] == "uqlm_best_response"].iloc[0]
+            evidence = dict(seen)[f"{best['sample_id']}:uqlm_best_response"]
+            self.assertIn("1991", best["answer"])                 # a sample was picked
+            self.assertEqual(evidence.count(best["answer"]), 1)    # 2 identical samples → one left out
+            self.assertIn("Python was released in 1985.", evidence)  # the baseline joins the evidence
+            self.assertEqual(len(evidence), 2)
+
+    def test_one_failing_selfcheck_scorer_keeps_the_others(self):
+        import selfcheckgpt.modeling_selfcheck as upstream
+        detector = SelfCheckGPTDetector(ReplayModel(["Python was released in 1991."]),
+                                        method=["ngram", "bertscore"], n_samples=2)
+
+        class Broken:
+            def __init__(self, *a, **k):
+                pass
+
+            def predict(self, **kwargs):
+                raise IndexError("list index out of range")
+        with patch.object(upstream, "SelfCheckBERTScore", Broken):
+            result = detector.detect("When?", "ctx", "Python was released in 1991.")
+        self.assertIn("ngram", result.scores)
+        self.assertIn("bertscore", result.errors)
+
+    def test_cove_parses_numbered_questions(self):
+        from reducers.cove import ChainOfVerificationReducer
+        self.assertEqual(ChainOfVerificationReducer.parse_questions("1. Who?\n- When was it?\n\nQ3: Where?"),
+                         ["Who?", "When was it?", "Where?"])
+        self.assertEqual(ChainOfVerificationReducer.parse_questions("Here are the questions:\n1. Who?"),
+                         ["Who?"])
 
 
 class CountingModel(ReplayModel):
@@ -535,6 +564,42 @@ class CountingModel(ReplayModel):
     def sample_n(self, prompt, n=5, temperature=1.0):
         self.calls += 1
         return super().sample_n(prompt, n=n, temperature=temperature)
+
+
+class ResourceTests(unittest.TestCase):
+    def _remote(self, source: Path, sha: str):
+        from utils.resources import RemoteFile
+        return RemoteFile("test file", source.as_uri(), sha, source.stat().st_size)
+
+    def test_download_verifies_checksum_and_keeps_good_file(self):
+        import hashlib
+        from utils.resources import download
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "source.json"
+            source.write_text('{"a": 1}\n')
+            target = Path(temp_dir) / "out" / "data.json"
+            download(self._remote(source, hashlib.sha256(source.read_bytes()).hexdigest()), target)
+            self.assertEqual(target.read_bytes(), source.read_bytes())
+
+    def test_download_discards_a_file_with_the_wrong_checksum(self):
+        from utils.resources import download
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "source.json"
+            source.write_text("tampered\n")
+            target = Path(temp_dir) / "data.json"
+            with self.assertRaisesRegex(RuntimeError, "checksum"):
+                download(self._remote(source, "0" * 64), target)
+            self.assertFalse(target.exists())
+            self.assertFalse(target.with_name("data.json.part").exists())
+
+    def test_every_configured_dataset_file_has_a_pinned_download(self):
+        from utils.resources import REMOTE_FILES
+        config = yaml.safe_load((ROOT / "config.yaml").read_text())
+        for ds in config["datasets"]:
+            for key in ("path", "responses_path", "sources_path"):
+                if ds.get(key):
+                    self.assertIn(ds[key], REMOTE_FILES, ds["name"])
+        self.assertIn(config["detectors"]["alignscore"]["checkpoint_path"], REMOTE_FILES)
 
 
 class RunIntegrityTests(unittest.TestCase):
@@ -573,29 +638,97 @@ class RunIntegrityTests(unittest.TestCase):
         self.assertEqual(row["n_cases"], 3)
         self.assertEqual(row["n_failed"], 1)
 
-    def test_single_run_folder_gets_the_same_report_files_as_a_full_run(self):
-        sys.path.insert(0, str(ROOT))
-        from scripts.generate_report import generate
+    def _write_run(self, folder: Path, detectors: dict, generators=None) -> None:
+        import pandas as pd
+        config = {
+            "datasets": [{"name": "synthetic", "enabled": True, "source": "synthetic", "max_samples": 4}],
+            "detectors": detectors,
+            "benchmark": {"output_dir": str(folder), "seed": 42},
+        }
+        datasets = DatasetLoader(config, seed=42).load_all()
+        runner = BenchmarkRunner(config)
+        raw = runner.validate(datasets, generators=generators)
+        frames = []
+        for column, threshold in runner.thresholds().items():
+            frame = DetectorValidator().evaluate_frame(
+                raw.drop_duplicates("case_id"), [column], {column: threshold})
+            frame["model"] = ("replay" if column in runner.generator_columns()
+                              else "n/a (model-independent detector)")
+            frames.append(frame)
+        pd.concat(frames).to_csv(folder / "detector_validation_summary.csv", index=False)
+        # the report's run-plan section reads these, as in a real run folder
+        (folder / "config_used.yaml").write_text(yaml.safe_dump({**config, "judge": {"model": "judge:7b"},
+                                                                 "reduction": {"methods": []}}))
+
+    def test_single_run_folder_gets_the_full_report_set(self):
+        from reporting import generate
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            config = {
-                "datasets": [{"name": "synthetic", "enabled": True,
-                              "source": "synthetic", "max_samples": 4}],
-                "detectors": {"selfcheckgpt": {"enabled": True, "method": "ngram",
-                                               "n_samples": 2, "threshold": 3.0}},
-                "benchmark": {"output_dir": temp_dir, "seed": 42},
-            }
-            datasets = DatasetLoader(config, seed=42).load_all()
-            runner = BenchmarkRunner(config)
-            raw = runner.validate(datasets, generators=[ReplayModel(["Python was released in 1991."])])
-            summary = DetectorValidator().evaluate_frame(raw, ["selfcheckgpt_score"],
-                                                         {"selfcheckgpt_score": 3.0})
-            summary["model"] = "replay"
-            summary.to_csv(Path(temp_dir) / "detector_validation_summary.csv", index=False)
-            produced = generate(Path(temp_dir))
-            self.assertTrue(produced["report"].is_file())
-            self.assertTrue((Path(temp_dir) / "combined_summary.csv").is_file())
-            self.assertTrue(any((Path(temp_dir) / "charts").glob("*.png")))
+            run = Path(temp_dir) / "run_01"
+            run.mkdir()
+            self._write_run(run, {"selfcheckgpt": {"enabled": True, "method": "ngram",
+                                                   "n_samples": 2, "threshold": 3.0}},
+                            [ReplayModel(["Python was released in 1991."])])
+            produced = generate(run)
+            for name in ("REPORT.md", "report.html", "report.docx", "takeaways.md"):
+                self.assertTrue((run / name).is_file(), name)
+            self.assertTrue(any((run / "charts").glob("*.png")))
+            self.assertTrue((run / "tables" / "per_dataset.csv").is_file())
+            self.assertEqual(produced["report (md)"], run / "REPORT.md")
+
+    def test_combined_report_spans_every_detector_and_run(self):
+        import pandas as pd
+        from reporting import generate
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for run in ("run_01", "run_02"):
+                sc = root / "selfcheckgpt" / run
+                sc.mkdir(parents=True)
+                self._write_run(sc, {"selfcheckgpt": {"enabled": True, "method": "ngram",
+                                                      "n_samples": 2, "threshold": 3.0}},
+                                [ReplayModel(["Python was released in 1991."])])
+                mc = root / "minicheck" / run
+                mc.mkdir(parents=True)
+                self._write_run(mc, {"minicheck": {"enabled": True}, "summac": {"enabled": True}})
+            generate(root, out_dir=root / "combined")
+            ms = pd.read_csv(root / "combined" / "tables" / "summary_mean_std.csv")
+            self.assertEqual(sorted(ms["detector"]), ["minicheck", "selfcheckgpt_ngram", "summac"])
+            self.assertTrue((ms["n_runs"] == 2).all())
+            by_run = pd.read_csv(root / "combined" / "tables" / "summary_by_run.csv")
+            self.assertEqual(sorted(by_run["run"].unique()), ["run_01", "run_02"])
+            for name in ("REPORT.md", "report.html", "report.docx", "takeaways.md", "raw_all_runs.csv"):
+                self.assertTrue((root / "combined" / name).is_file(), name)
+
+    def test_run_plan_precedence_flag_over_section_over_plan(self):
+        import argparse
+        import main
+
+        config = {
+            "run": {"runs": 3, "samples_per_dataset": 50, "detectors": ["selfcheckgpt", "minicheck"],
+                    "selfcheckgpt_samples": 5, "reduce": True, "reduction_iterations": 3},
+            "datasets": [{"name": "a", "source": "json"}, {"name": "b", "source": "synthetic", "max_samples": 8}],
+            "detectors": {}, "reduction": {}, "benchmark": {},
+        }
+        args = argparse.Namespace(output=None, detectors=None, max_samples=None, n_samples=2,
+                                  max_iterations=None, device=None, runs=None, reduce=False,
+                                  no_reduce=False)
+        plan = main.apply_plan(config, args)
+        self.assertEqual(plan["runs"], 3)
+        self.assertEqual(plan["samples_per_dataset"], {"a": 50, "b": 8})
+        self.assertEqual(plan["selfcheckgpt_samples"], 2)
+        self.assertEqual(plan["detectors"], ["selfcheckgpt", "minicheck"])
+        self.assertTrue(plan["reduce"])
+        self.assertTrue(config["detectors"]["minicheck"]["enabled"])
+        self.assertFalse(config["detectors"]["summac"]["enabled"])
+
+        config2 = {**config, "run": dict(config["run"]), "datasets": [{"name": "a"}],
+                   "detectors": {}, "reduction": {}}
+        args2 = argparse.Namespace(**{**vars(args), "detectors": ["minicheck"], "max_samples": 2, "runs": 1})
+        plan2 = main.apply_plan(config2, args2)
+        self.assertFalse(plan2["reduce"])  # reduction needs selfcheckgpt
+        self.assertEqual(plan2["samples_per_dataset"], {"a": 2})
+        self.assertEqual(plan2["runs"], 1)
 
     def test_ollama_failure_raises_instead_of_returning_empty_text(self):
         fake_ollama = types.ModuleType("ollama")

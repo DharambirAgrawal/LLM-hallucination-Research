@@ -26,6 +26,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional, TYPE_CHECKING
 
+from models.prompts import grounded_prompt
+
 if TYPE_CHECKING:
     from models.base_model import BaseModel
 
@@ -66,11 +68,8 @@ class SelfRefineReducer:
     # ── prompts (local; not copied from the upstream repository) ──────────
 
     def _initial_prompt(self, question: str, context: str) -> str:
-        return (
-            "Answer the question using ONLY the supplied context. Be concise "
-            "and do not add unsupported information.\n\n"
-            f"Context: {context}\n\nQuestion: {question}\n\nAnswer:"
-        )
+        # Same prompt as the baseline answer and the SelfCheckGPT samples.
+        return grounded_prompt(question, context)
 
     def _feedback_prompt(self, question: str, context: str, answer: str) -> str:
         return (

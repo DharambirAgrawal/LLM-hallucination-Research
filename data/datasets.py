@@ -4,7 +4,7 @@ Dataset loader for hallucination benchmarks.
 Sources:
   - json      : local files such as the official HaluEval QA / dialogue /
                 summarization data (RUCAIBox/HaluEval, commit pinned in
-                provenance/sources.yaml; fetch with scripts/prepare_halueval.py)
+                provenance/sources.yaml; downloaded automatically by utils/resources.py)
   - hf        : a Hugging Face dataset (pin `revision` before reporting)
   - synthetic : 8 hand-written QA pairs with planted hallucinations
                 (engineering smoke fixture only, not research data)
@@ -15,6 +15,7 @@ reproducible random subset of the whole file rather than its first rows.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import re
@@ -39,6 +40,9 @@ class BenchmarkSample:
     right_answer:         str
     hallucinated_answer: str
     metadata:       dict = field(default_factory=dict)
+    # Extra labeled answers: {"answer": str, "label": 0|1, "source": str}.
+    # RAGTruth / HaluBench use these instead of a right/hallucinated pair.
+    labeled_answers: List[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -49,6 +53,7 @@ class BenchmarkSample:
             "right_answer":           self.right_answer,
             "hallucinated_answer":  self.hallucinated_answer,
             "metadata":         self.metadata,
+            "labeled_answers":  self.labeled_answers,
         }
 
     @classmethod
@@ -206,13 +211,26 @@ class DatasetLoader:
                 if source == "hf":
                     samples = self._load_hf(ds_cfg)
                 elif source == "synthetic":
-                    samples = _make_synthetic(ds_cfg.get("max_samples", 100), self.seed)
+                    n = ds_cfg.get("max_samples", 100)
+                    if n > len(SYNTHETIC_CONTEXTS):
+                        logger.warning(
+                            f"{name}: max_samples is {n} but the fixture has "
+                            f"{len(SYNTHETIC_CONTEXTS)} distinct items; they repeat"
+                        )
+                    samples = _make_synthetic(n, self.seed)
                 elif source == "json":
                     samples = self._load_json(ds_cfg)
+                elif source == "ragtruth":
+                    samples = self._load_ragtruth(ds_cfg)
+                elif source == "halubench":
+                    samples = self._load_halubench(ds_cfg)
                 else:
                     logger.warning(f"Unknown source '{source}' for dataset '{name}'")
                     continue
 
+                ids = [s.sample_id for s in samples]
+                if len(ids) != len(set(ids)):
+                    raise ValueError(f"duplicate sample ids in '{name}'; paired comparisons would misalign")
                 result[name] = samples
                 logger.debug(f"{len(samples)} samples loaded from '{name}'")
             except Exception as exc:
@@ -312,8 +330,8 @@ class DatasetLoader:
         path = Path(cfg["path"])
         if not path.exists():
             raise FileNotFoundError(
-                f"{path} not found. Run `python scripts/prepare_halueval.py` "
-                f"(or see docs/REPRODUCIBILITY.md) to fetch official data first."
+                f"{path} not found (main.py downloads the official HaluEval "
+                f"files automatically; see utils/resources.py)"
             )
         text = path.read_text(encoding="utf-8").strip()
         if text.startswith("["):
@@ -334,6 +352,127 @@ class DatasetLoader:
             sample = self._normalise_row(data[i], cfg, name, i)
             if sample:
                 samples.append(sample)
+        if len(samples) < limit:
+            logger.warning(
+                f"{name}: max_samples is {limit} but {path.name} has only "
+                f"{len(samples)} usable rows; using all of them"
+            )
+        return samples
+
+    def _pick(self, keys: list, limit: int, name: str, what: str) -> list:
+        """Seeded random subset, same in every run."""
+        keys = list(keys)
+        random.Random(self.seed).shuffle(keys)
+        if len(keys) < limit:
+            logger.warning(f"{name}: max_samples is {limit} but only {len(keys)} {what} exist; using all")
+        return keys[:limit]
+
+    # ── RAGTruth ────────────────────────────────────────────────────────
+
+    def _load_ragtruth(self, cfg: dict) -> List[BenchmarkSample]:
+        """One sample per RAGTruth source (question/document/data record) of
+        the configured task type, with every labeled model response to it.
+
+        label = 1 when annotators marked at least one hallucinated span.
+        Only the official `test` split is used, and responses with quality
+        other than "good" (incorrect refusals, truncations) are skipped.
+        question = RAGTruth's own task instruction without the context;
+        context = the passages / news document / structured data.
+        """
+        responses_path, sources_path = Path(cfg["responses_path"]), Path(cfg["sources_path"])
+        for path in (responses_path, sources_path):
+            if not path.exists():
+                raise FileNotFoundError(f"{path} not found (downloaded automatically by main.py)")
+        task, split = cfg["task_type"], cfg.get("split", "test")
+        sources = {}
+        with sources_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                row = json.loads(line)
+                if row["task_type"] == task:
+                    sources[row["source_id"]] = row
+        answers: dict = {}
+        with responses_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                row = json.loads(line)
+                if row["source_id"] in sources and row["split"] == split and row["quality"] == "good":
+                    answers.setdefault(row["source_id"], []).append(row)
+
+        name = cfg["name"]
+        samples = []
+        for source_id in self._pick(sorted(answers), cfg.get("max_samples", 200), name, "sources"):
+            src = sources[source_id]
+            info = src["source_info"]
+            prompt = src["prompt"]
+            if task == "QA":
+                question, context = info["question"], info["passages"]
+            elif task == "Summary":
+                context = info
+                question = prompt.split("\n", 1)[0].strip()          # "Summarize the following news within N words:"
+            else:  # Data2txt: instruction, then the JSON record, then "Overview:"
+                head, _, rest = prompt.partition("Structured data:")
+                question = head.replace("Instruction:", "").strip()
+                context = rest.rsplit("Overview:", 1)[0].strip()
+            samples.append(BenchmarkSample(
+                sample_id=f"{name}_{source_id}",
+                dataset=name,
+                question=question,
+                context=context,
+                right_answer="",
+                hallucinated_answer="",
+                metadata={"source_id": source_id, "task_type": task,
+                          "ragtruth_source": src.get("source"), "original_prompt": prompt},
+                labeled_answers=[
+                    {"answer": r["response"], "label": int(bool(r["labels"])),
+                     "source": r["model"], "answer_id": r["id"]}
+                    for r in sorted(answers[source_id], key=lambda r: r["id"])
+                ],
+            ))
+        return samples
+
+    # ── HaluBench ───────────────────────────────────────────────────────
+
+    def _load_halubench(self, cfg: dict) -> List[BenchmarkSample]:
+        """One sample per HaluBench (passage, question) of the configured
+        source_ds, with every PASS (label 0) / FAIL (label 1) answer to it."""
+        import pandas as pd
+
+        path = Path(cfg["path"])
+        if not path.exists():
+            raise FileNotFoundError(f"{path} not found (downloaded automatically by main.py)")
+        frame = pd.read_parquet(path)
+        frame = frame[frame["source_ds"] == cfg["source_ds"]]
+        # HaluBench's DROP FAIL answers include 272 Python list literals
+        # ("['Rams', 'second', ...]") and no PASS answer has that form, so a
+        # detector could separate the classes by format alone. Such answers
+        # are excluded (both labels), and the count is logged.
+        literal = frame["answer"].astype(str).str.strip().str.match(r"^\[.*\]$")
+        if literal.any():
+            logger.info(f"{cfg['name']}: excluded {int(literal.sum())} list-literal answers "
+                        f"(format artifact: {dict(frame[literal]['label'].value_counts())})")
+            frame = frame[~literal]
+        groups = {key: group for key, group in frame.groupby(["passage", "question"], sort=True)}
+        name = cfg["name"]
+        samples = []
+        for index, key in enumerate(self._pick(sorted(groups), cfg.get("max_samples", 200), name, "questions")):
+            group = groups[key].sort_values("id")
+            passage, question = key
+            # Stable id from the question itself: HaluBench ids share long
+            # prefixes (e.g. "financebench_id_…"), so a truncated id collides.
+            digest = hashlib.sha1(f"{passage}\x00{question}".encode("utf-8")).hexdigest()[:12]
+            samples.append(BenchmarkSample(
+                sample_id=f"{name}_{digest}",
+                dataset=name,
+                question=str(question).strip(),
+                context=str(passage).strip(),
+                right_answer="",
+                hallucinated_answer="",
+                metadata={"source_ds": cfg["source_ds"]},
+                labeled_answers=[
+                    {"answer": str(row.answer), "label": int(row.label == "FAIL"),
+                     "source": "halubench", "answer_id": row.id}
+                    for row in group.itertuples(index=False)
+                ],
+            ))
         return samples
 
     @staticmethod
@@ -364,5 +503,18 @@ class DatasetLoader:
                     "context": sample.context,
                     "answer": sample.hallucinated_answer,
                     "label": 1,
+                })
+            for item in sample.labeled_answers:
+                if not str(item["answer"]).strip():
+                    continue
+                cases.append({
+                    "case_id": f"{sample.sample_id}:{item.get('answer_id', len(cases))}",
+                    "sample_id": sample.sample_id,
+                    "dataset": sample.dataset,
+                    "question": sample.question,
+                    "context": sample.context,
+                    "answer": item["answer"],
+                    "label": int(item["label"]),
+                    "answer_source": item.get("source"),
                 })
         return cases

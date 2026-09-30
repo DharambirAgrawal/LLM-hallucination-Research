@@ -1,0 +1,4 @@
+# Isolated venv for MiniCheck (installed by scripts/run_full.py).
+# Pinned to the commit reviewed in provenance/sources.yaml.
+-r base.txt
+minicheck @ git+https://github.com/Liyan06/MiniCheck.git@b58b9fa69acbd1015ec970fa65dd752413a053d2

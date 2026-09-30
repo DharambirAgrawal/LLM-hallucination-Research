@@ -23,10 +23,36 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # Packages whose version changes a score or a generation.
 KEY_PACKAGES = (
-    "selfcheckgpt", "minicheck", "summac", "alignscore", "torch",
-    "transformers", "sentence-transformers", "spacy", "nltk", "ollama",
-    "numpy", "pandas", "scikit-learn",
+    "selfcheckgpt", "uqlm", "minicheck", "summac", "alignscore", "torch",
+    "transformers", "sentence-transformers", "bert-score", "spacy", "nltk",
+    "ollama", "langchain-ollama", "openai", "numpy", "pandas", "scikit-learn",
 )
+
+
+# Hugging Face models the detectors download through their own packages.
+# The packages load "main", so the revision each run actually used is read
+# from the local Hugging Face cache and recorded (it cannot be pinned without
+# changing upstream code).
+HF_MODELS = (
+    "roberta-large",                               # SelfCheckGPT BERTScore
+    "potsawee/deberta-v3-large-mnli",              # SelfCheckGPT NLI
+    "microsoft/deberta-large-mnli",                # UQLM NLI scorers / semantic entropy
+    "sentence-transformers/all-MiniLM-L6-v2",      # UQLM cosine similarity
+    "lytang/MiniCheck-Flan-T5-Large",              # MiniCheck
+    "tals/albert-xlarge-vitaminc-mnli",            # SummaC vitc
+)
+
+
+def _hf_revisions() -> dict:
+    import os
+    hub = Path(os.environ.get("HF_HUB_CACHE") or
+               Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub")
+    found = {}
+    for repo in HF_MODELS:
+        ref = hub / f"models--{repo.replace('/', '--')}" / "refs" / "main"
+        if ref.is_file():
+            found[repo] = ref.read_text().strip()
+    return found
 
 
 def _git(*args: str) -> str | None:
@@ -109,6 +135,7 @@ def write_run_files(
         "python": sys.version.split()[0],
         "platform": platform.platform(),
         "packages": {name: _version(name) for name in KEY_PACKAGES if _version(name)},
+        "huggingface_models": _hf_revisions(),
         "datasets": dataset_entries,
         "models": model_entries,
         "seed": config.get("benchmark", {}).get("seed"),

@@ -1,28 +1,36 @@
 #!/usr/bin/env python3
-"""Orchestrate a "full run": every requested detector, each in its own
-isolated venv, plus the reduction stage, collected into one output folder
-with one combined report.
+"""Orchestrate a "full run": every detector group in its own environment,
+plus the reduction stage, collected into one output folder with one
+combined report.
 
-Why per-detector venvs: SelfCheckGPT, MiniCheck, SummaC, and AlignScore each
-pin their own (conflicting) upstream torch/transformers versions. That is a
-real constraint of the upstream packages, not something this script can paper
-over — see docs/HOW_TO_RUN.md §3. This script just automates creating and
-reusing one venv per detector instead of doing it by hand.
+Environments (run in this order):
+  core        requirements.txt: SelfCheckGPT + UQLM + the UQLM judge. They
+              share the generator samples, and this environment also runs
+              the reduction stage.
+  minicheck   requirements/minicheck.txt   } each pins conflicting torch /
+  summac      requirements/summac.txt      } transformers versions upstream,
+  alignscore  requirements/alignscore.txt  } so each gets its own venv; each
+              also scores core's reduction answers (--score-reduction-from).
 
-Run this with the base controller environment's Python (docs/HOW_TO_RUN.md
-§0.3). SelfCheckGPT runs directly in that environment when it is installed
-there; every other detector gets its own `.venv-<name>`, created on first use
-and reinstalled automatically if its requirements file changed or a previous
-install did not finish. pip output goes to `<output>/logs/`, not the screen.
+Two phases. Phase 1 installs every environment, downloads everything, and
+runs each environment's preflight (`main.py --preflight`: one real question
+through the whole pipeline). Phase 2, the long runs, starts only if every
+environment passed, so a broken install or missing model shows up in the
+first minutes, not after hours of another environment's run.
 
-Example — the 5-sample, 2-turn smoke version of a full run:
+Run this with the controller environment's Python (docs/HOW_TO_RUN.md §0.3).
+core runs directly in that environment when requirements.txt is installed
+there; every other environment gets its own `.venv-<name>`, created on first
+use and reinstalled automatically if its requirements file changed or a
+previous install did not finish. pip output goes to `<output>/logs/`.
 
-    python scripts/run_full.py --max-samples 5 --n-samples 2 --max-iterations 2
+The full run: exactly the `run:` block of config.yaml
 
-Example — the full-size run, every detector, using config.yaml's own sample
-sizes:
+    python scripts/run_full.py
 
-    python scripts/run_full.py --detectors selfcheckgpt minicheck summac
+A small smoke version of it (same outputs, less data):
+
+    python scripts/run_full.py --runs 2 --max-samples 2 --n-samples 2 --max-iterations 1
 """
 from __future__ import annotations
 
@@ -40,35 +48,18 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from utils import console  # noqa: E402
 
-# Each entry: pip requirements file for that detector's isolated venv, extra
-# main.py flags, and (alignscore only) a checkpoint that must already exist
-# since it is not auto-downloaded.
-DETECTOR_SETUP = {
-    "selfcheckgpt": {
-        "requirements": "requirements-colab-smoke.txt",
-        "extra_args": lambda a: [
-            "--reduce",
-            "--n-samples", str(a.n_samples),
-            "--max-iterations", str(a.max_iterations),
-        ],
-        "checkpoint": None,
-    },
-    "minicheck": {
-        "requirements": "requirements-colab-minicheck.txt",
-        "extra_args": lambda a: [],
-        "checkpoint": None,
-    },
-    "summac": {
-        "requirements": "requirements-summac.txt",
-        "extra_args": lambda a: [],
-        "checkpoint": None,
-    },
-    "alignscore": {
-        "requirements": "requirements-alignscore.txt",
-        "extra_args": lambda a: [],
-        "checkpoint": ROOT / "external_models" / "alignscore" / "AlignScore-base.ckpt",
-    },
+# Environments, in run order. "core" holds the sampling-based detectors and
+# the judge (they share the generator samples) and runs the reduction stage;
+# the others each hold one detector with conflicting dependencies and score
+# core's reduction answers too. Data, checkpoints and models are fetched by
+# main.py; sizes come from config.yaml's `run:` block.
+ENVIRONMENTS = {
+    "core": {"requirements": "requirements.txt", "detectors": ("selfcheckgpt", "uqlm", "uqlm_judge")},
+    "minicheck": {"requirements": "requirements/minicheck.txt", "detectors": ("minicheck",)},
+    "summac": {"requirements": "requirements/summac.txt", "detectors": ("summac",)},
+    "alignscore": {"requirements": "requirements/alignscore.txt", "detectors": ("alignscore",)},
 }
+ALL_DETECTORS = tuple(d for env in ENVIRONMENTS.values() for d in env["detectors"])
 MARKER = ".requirements.sha256"
 
 
@@ -81,32 +72,25 @@ def parse_args() -> argparse.Namespace:
         "--output",
         help="Combined output folder (default: results/full-run-<timestamp>)",
     )
-    parser.add_argument(
-        "--max-samples", type=int,
-        help="Cap every dataset to N samples (omit to use config.yaml's own sizes)",
-    )
-    parser.add_argument(
-        "--n-samples", type=int, default=5,
-        help="SelfCheckGPT generations per case (default: 5)",
-    )
-    parser.add_argument(
-        "--max-iterations", type=int, default=3,
-        help="Reduction feedback/refine steps (default: 3)",
-    )
+    parser.add_argument("--runs", type=int, help="Independent repeats (default: run.runs)")
+    parser.add_argument("--max-samples", type=int,
+                        help="Samples per dataset (default: run.samples_per_dataset)")
+    parser.add_argument("--n-samples", type=int,
+                        help="SelfCheckGPT samples per question (default: run.selfcheckgpt_samples)")
+    parser.add_argument("--max-iterations", type=int,
+                        help="Reduction rounds (default: run.reduction_iterations)")
+    parser.add_argument("--no-reduce", action="store_true", help="Skip the reduction stage")
     parser.add_argument(
         "--device", choices=("cpu", "cuda"),
         help="Device for the torch-based detectors (passed to main.py --device)",
     )
     parser.add_argument(
-        "--detectors", nargs="+", default=["selfcheckgpt", "minicheck", "summac"],
-        choices=sorted(DETECTOR_SETUP),
-        help="Detectors to run, each in its own venv (default: selfcheckgpt "
-             "minicheck summac). alignscore is opt-in — it also needs a "
-             "manually downloaded checkpoint; see METHOD_SOURCES.md.",
+        "--detectors", nargs="+", choices=ALL_DETECTORS,
+        help="Detectors to run (default: run.detectors in the config)",
     )
     parser.add_argument(
         "--skip-report", action="store_true",
-        help="Only run detectors/reduction; skip the combined chart and report",
+        help="Only run the environments; skip the top-level combined report",
     )
     return parser.parse_args()
 
@@ -127,8 +111,8 @@ def requirements_hash(requirements: str) -> str:
 
 def ensure_python(name: str, requirements: str, log_dir: Path) -> Path:
     """Return the interpreter that runs `name`, installing its venv if needed."""
-    if name == "selfcheckgpt" and importlib.util.find_spec("selfcheckgpt"):
-        console.line("environment      this interpreter (selfcheckgpt already installed)")
+    if name == "core" and all(importlib.util.find_spec(m) for m in ("selfcheckgpt", "uqlm")):
+        console.line("environment      this interpreter (requirements.txt already installed)")
         return Path(sys.executable)
 
     venv_dir = ROOT / f".venv-{name}"
@@ -167,46 +151,88 @@ def main() -> None:
     log_dir = output_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    console.header("Full run · every detector in its own environment")
-    console.kv("detectors", ", ".join(args.detectors))
-    console.kv("config", args.config)
-    console.kv("sample size", f"{args.max_samples} per dataset" if args.max_samples
-               else "config.yaml max_samples")
-    console.kv("selfcheckgpt", f"n_samples={args.n_samples} · reduction max_iterations={args.max_iterations}")
+    import yaml
+    plan = (yaml.safe_load((ROOT / args.config).read_text()) or {}).get("run", {})
+    config = yaml.safe_load((ROOT / args.config).read_text()) or {}
+    plan = config.get("run", {})
+    selected = args.detectors or plan.get("detectors") or list(ALL_DETECTORS)
+    envs = {name: [d for d in env["detectors"] if d in selected] for name, env in ENVIRONMENTS.items()}
+    envs = {name: dets for name, dets in envs.items() if dets}
+    args.detectors = list(envs)             # environments, in run order
+    runs = args.runs if args.runs is not None else plan.get("runs", 1)
+    reduce_on = not args.no_reduce and plan.get("reduce", False) and \
+        any(d in envs.get("core", []) for d in ("selfcheckgpt", "uqlm"))
+    console.header("Full run · each detector group in its own environment")
+    console.kv("config", f"{args.config} (run plan below; flags override it)")
+    console.kv("runs", f"{runs} per environment → <env>/run_01 … + combined/")
+    for name, dets in envs.items():
+        console.kv(f"env {name}", ", ".join(dets))
+    console.kv("questions", f"{args.max_samples or plan.get('samples_per_dataset')} per dataset")
+    console.kv("samples", f"{args.n_samples or plan.get('selfcheckgpt_samples')} per question per model")
+    console.kv("reduction", "off" if not reduce_on else
+               ", ".join(config.get("reduction", {}).get("methods", [])) + " vs. baseline (in core; "
+               "every other environment also scores these answers)")
     console.kv("output", output_dir)
 
-    results = []  # (name, status, seconds)
+    def main_args(name: str) -> list[str]:
+        cmd_args = ["--config", args.config, "--detectors", *envs[name],
+                    "--output", str(output_dir / name)]
+        if name != "core" and reduce_on:
+            cmd_args += ["--score-reduction-from", str(output_dir / "core")]
+        for flag, value in (("--runs", args.runs), ("--max-samples", args.max_samples),
+                            ("--n-samples", args.n_samples), ("--max-iterations", args.max_iterations),
+                            ("--device", args.device)):
+            if value is not None:
+                cmd_args += [flag, str(value)]
+        if args.no_reduce:
+            cmd_args.append("--no-reduce")
+        return cmd_args
+
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     total = len(args.detectors)
+
+    # Phase 1: install every environment, download everything, and run each
+    # detector's preflight (one real case through the whole pipeline).
+    # Nothing long starts unless every detector passes.
+    console.header("Phase 1/2 · Prepare and check every detector before the long runs")
+    pythons: dict[str, Path] = {}
+    problems = []
     for index, name in enumerate(args.detectors, 1):
-        setup = DETECTOR_SETUP[name]
+        console.section(f"[{index}/{total}] {name}")
+        try:
+            pythons[name] = ensure_python(name, ENVIRONMENTS[name]["requirements"], log_dir)
+        except subprocess.CalledProcessError:
+            problems.append((name, f"install failed — see {log_dir / f'pip-{name}.log'}"))
+            continue
+        preflight_args = [a for a in main_args(name)]
+        if "--score-reduction-from" in preflight_args:   # its answers do not exist yet
+            i = preflight_args.index("--score-reduction-from")
+            del preflight_args[i:i + 2]
+        code = subprocess.run(
+            [str(pythons[name]), "main.py", *preflight_args, "--preflight"],
+            cwd=ROOT, env=env,
+        ).returncode
+        if code != 0:
+            problems.append((name, f"preflight failed — see {output_dir / name / 'run.log'}"))
+
+    if problems:
+        console.header("Stopped before the long runs")
+        for name, reason in problems:
+            console.line(f"✗ {name:<14} {reason}")
+        console.line()
+        console.line("Nothing long was started. Fix the items above and run the same command again;")
+        console.line("installed environments and downloads are reused.")
+        raise SystemExit(1)
+
+    # Phase 2: the real runs. Everything was just verified.
+    console.header("Phase 2/2 · Runs (all detectors passed their checks)")
+    results = []  # (name, status, seconds)
+    for index, name in enumerate(args.detectors, 1):
         print(f"\n\n{'#' * console.WIDTH}\n#  [{index}/{total}] {name}\n{'#' * console.WIDTH}",
               file=sys.stderr, flush=True)
         detector_started = time.monotonic()
-        checkpoint = setup["checkpoint"]
-        if checkpoint is not None and not checkpoint.exists():
-            console.line(f"skipped: checkpoint not found at {checkpoint}")
-            console.line("download it first (see METHOD_SOURCES.md), then rerun with "
-                         f"--detectors {name}")
-            results.append((name, "skipped (no checkpoint)", 0.0))
-            continue
-
-        cmd_args = ["--config", args.config, "--detectors", name,
-                    "--output", str(output_dir / name)]
-        if args.max_samples is not None:
-            cmd_args += ["--max-samples", str(args.max_samples)]
-        if args.device:
-            cmd_args += ["--device", args.device]
-        cmd_args += setup["extra_args"](args)
-
-        try:
-            python = ensure_python(name, setup["requirements"], log_dir)
-        except subprocess.CalledProcessError:
-            console.line(f"✗ install failed — see {log_dir / f'pip-{name}.log'}")
-            results.append((name, "install failed", time.monotonic() - detector_started))
-            continue
-
-        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
-        code = subprocess.run([str(python), "main.py", *cmd_args], cwd=ROOT, env=env).returncode
+        code = subprocess.run([str(pythons[name]), "main.py", *main_args(name)],
+                              cwd=ROOT, env=env).returncode
         seconds = time.monotonic() - detector_started
         if code == 0:
             results.append((name, "ok", seconds))
@@ -216,8 +242,10 @@ def main() -> None:
     ran = [name for name, status, _ in results if status == "ok"]
     produced = {}
     if ran and not args.skip_report:
-        from scripts.generate_report import generate
-        produced = generate(output_dir)
+        from reporting import generate
+        console.header("Combined report · every detector, every run")
+        produced = generate(output_dir, out_dir=output_dir / "combined",
+                            title=f"{output_dir.name} · all detectors")
 
     console.header(f"Full run finished in {console.duration(time.monotonic() - started)}")
     for name, status, seconds in results:
@@ -226,8 +254,13 @@ def main() -> None:
     if not ran:
         raise SystemExit("\nNo detector produced results; nothing to report.")
     console.line()
-    console.kv("combined report", produced.get("report", "skipped (--skip-report)"))
-    console.kv("per-detector", f"{output_dir}/<detector>/REPORT.md")
+    console.line(f"{output_dir}/")
+    for name in args.detectors:
+        console.line(f"  {name}/run_01 … /combined   {', '.join(envs[name])}: each run + its own report")
+    console.line("  combined/   all detectors, all runs: REPORT.md · report.html · report.docx · "
+                 "takeaways.md   ← start here")
+    if "report (docx)" in produced:
+        console.kv("open", produced["report (docx)"])
 
 
 if __name__ == "__main__":

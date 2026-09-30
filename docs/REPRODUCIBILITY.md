@@ -72,30 +72,27 @@ baselines, provider services, and the proposed method as separate conditions.
 
 ## Execution topology
 
-The source repository does not need an LLM or model checkpoint. The intended
-topology is:
+Everything runs on one local machine:
 
 ```text
-controller / analysis machine
-    -> remote OpenAI-compatible endpoint or remote Ollama
-    -> optional evaluator service with SelfCheckGPT, SummaC, AlignScore, etc.
-    -> JSONL/CSV result artifacts with complete run metadata
+main.py / scripts/run_full.py
+    -> local Ollama server (generator models)
+    -> detector packages, each in its own Python environment
+    -> run folders with CSV/JSONL results, reports and complete run metadata
 ```
 
-Ollama can be accessed remotely through its native API or OpenAI-compatible
-endpoint. API-backed detectors such as Amazon Bedrock contextual grounding and
-OpenAI Guardrails must be reported as provider baselines, not as open-source
-algorithm reproductions.
+API-backed detectors such as Amazon Bedrock contextual grounding and OpenAI
+Guardrails are not used. If they are ever added, they must be reported as
+provider baselines, not as open-source algorithm reproductions.
 
 ## Environment layout
 
 Keep dependency groups separate:
 
-- `requirements.txt`: benchmark controller only;
-- `requirements-colab-*.txt`: one pinned official method per environment;
-- `requirements-upstream.txt`: index explaining the environment split;
-- a dedicated lock/container for each legacy reproduction;
-- no automatic model pulls in committed configurations.
+- `requirements.txt`: the one install (controller + pinned SelfCheckGPT);
+- `requirements/<detector>.txt`: one pinned official method per isolated
+  environment (MiniCheck, SummaC, AlignScore), installed by `scripts/run_full.py`;
+- `environment.txt` in every run folder records every installed version.
 
 Before publishing a run, archive the resolved dependency lock, configuration,
 source registry, prompts, raw generations, raw detector outputs, and the Git SHA
@@ -103,17 +100,14 @@ of this repository alongside the report.
 
 ## Preparing official data on the execution machine
 
-Do this on the data/execution machine, not on the lightweight controller:
-
-```bash
-python scripts/prepare_halueval.py
-```
-
-This fetches the three official HaluEval files with a matched right/
+Nothing to do by hand: every run's Setup step (`utils/resources.py`)
+fetches the three official HaluEval files with a matched right/
 hallucinated pair (`qa_data.json`, `dialogue_data.json`,
-`summarization_data.json`) directly from the commit pinned in
-`provenance/sources.yaml`, and prints a sha256 for each — record those
-alongside any reported run. `halueval_qa`, `halueval_dialogue`, and
+`summarization_data.json`) from the commit pinned in
+`provenance/sources.yaml` when they are missing, and verifies each against
+its recorded SHA-256. Each run's `run_manifest.json` records the checksums
+of the files it used. `python scripts/prepare_halueval.py` does only this
+download, for a machine that will later run offline. `halueval_qa`, `halueval_dialogue`, and
 `halueval_summarization` are already enabled in `config.yaml` and point at
 these paths. `general_data.json` is not fetched: it labels a single response
 hallucinated or not without a matched pair, so it does not fit this harness's

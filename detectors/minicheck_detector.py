@@ -37,7 +37,7 @@ class MiniCheckDetector:
         except ImportError as exc:
             raise RuntimeError(
                 "MiniCheck is not installed. Install the pinned revision with "
-                "`pip install -r requirements-colab-minicheck.txt`."
+                "`pip install -r requirements/minicheck.txt`."
             ) from exc
         self._scorer = MiniCheck(
             model_name=self.model_name,
@@ -53,7 +53,8 @@ class MiniCheckDetector:
         self._load()
         sentences = self._sentences(answer)
         if not context.strip() or not sentences:
-            return MiniCheckResult(score=1.0, is_hallucinated=True)
+            # Recorded as a failure like every other detector, never scored.
+            raise ValueError("empty context or answer cannot be scored")
         _, raw_prob, _, _ = self._scorer.score(
             docs=[context] * len(sentences),
             claims=sentences,

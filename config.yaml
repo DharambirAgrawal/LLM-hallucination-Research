@@ -1,33 +1,55 @@
-# Official-detector validation configuration.
-# Every detector is disabled by default because its upstream package may
-# download model weights. Use --dry-run locally or run the Colab workflow.
+# Hallucination benchmark configuration.
+
+# ══ RUN PLAN ══════════════════════════════════════════════════════════════
+# The one place that says how big a run is. `python scripts/run_full.py` runs
+# exactly this. Command-line flags override it for a single run (the smoke
+# test uses --runs 2 --max-samples 2 ...); every run prints the plan it used
+# and saves it in config_used.yaml / run_manifest.json.
+run:
+  runs: 3                   # independent repeats: run_01 … run_03, then combined/ (mean ± std)
+  samples_per_dataset: 20   # questions per dataset (10 datasets below → 200 questions per run).
+                            # HaluEval gives 2 labeled answers per question, RAGTruth ~6,
+                            # HaluBench 1–2 → about 570 labeled cases per model per run
+  detectors:                # every family runs its official upstream code
+    - selfcheckgpt          # ngram, bertscore, nli, prompt (LLM judge)   — needs samples
+    - uqlm                  # semantic entropy, NLI, cosine, BERTScore, … — needs samples
+    - uqlm_judge            # UQLM LLM-as-a-judge (judge.model below)
+    - minicheck             # own venv (scripts/run_full.py)
+    - summac                # own venv
+    # - alignscore          # own venv; ~1.9 GB checkpoint
+  selfcheckgpt_samples: 5   # stochastic answers drawn per question, per model (shared by
+                            # every sampling-based detector)
+  reduce: true              # Stage B: every method in reduction.methods, paired with baseline
+  reduction_iterations: 3   # max rounds for self_refine_adapted
+# Models: every entry in selected_models below. Datasets: every `enabled`
+# entry under datasets. The preflight prints the time this plan will take.
 
 ollama:
   host: "http://localhost:11434"
   timeout: 120
+  # Pull any selected model that is not on the Ollama server yet, with a
+  # progress bar, before the run starts. Set false (here or per model) to
+  # skip missing models instead.
+  auto_pull: true
 
-# SelfCheckGPT alone needs repeated generations. Point this entry at an LLM
-# server on another machine, or replace it with the API example below.
-#
+# Generator models: they answer the questions, draw the samples that the
+# sampling-based detectors compare against, and run the reduction methods.
 # Cross-lab, fast-model set for detector research (avoid single-vendor bias).
-# Verify every tag with `ollama pull <tag>` on the research machine first —
-# some names below (esp. deepseek-r1, gemma3) may have newer successors by
-# the time you run this; check `ollama list` / ollama.com/library.
+# Missing tags are pulled automatically (ollama.auto_pull). Some names below
+# (esp. deepseek-r1, gemma3) may have newer successors by the time you run
+# this; check ollama.com/library.
 models:
   - name: "llama3.2-3b"       # Meta
     provider: "ollama"
     model: "llama3.2:3b"
-    auto_pull: false
 
   - name: "qwen2.5-7b"        # Alibaba
     provider: "ollama"
     model: "qwen2.5:7b"
-    auto_pull: false
 
   - name: "deepseek-r1-7b"    # DeepSeek (Qwen-distilled reasoning model)
     provider: "ollama"
     model: "deepseek-r1:7b"
-    auto_pull: false
     # Reasoning models: without this the <think> trace would count toward
     # max_tokens and could leave no final answer. Any <think> block that
     # still appears is stripped before scoring (models/ollama_model.py).
@@ -36,12 +58,10 @@ models:
   - name: "gemma3-4b"         # Google
     provider: "ollama"
     model: "gemma3:4b"
-    auto_pull: false
 
   - name: "gpt-oss-20b"       # OpenAI (open-weight, MoE — fast despite size)
     provider: "ollama"
     model: "gpt-oss:20b"
-    auto_pull: false
     # gpt-oss cannot turn reasoning off, only down; its reasoning tokens
     # share max_tokens with the answer, hence the larger budget.
     think: "low"
@@ -51,17 +71,18 @@ selected_models: ["llama3.2-3b", "qwen2.5-7b", "deepseek-r1-7b", "gemma3-4b", "g
 
 # Real HaluEval data (`halueval_qa`/`halueval_dialogue`/`halueval_summarization`)
 # gives 3 genuinely different task types instead of one repeating synthetic
-# pool. Run `python scripts/prepare_halueval.py` once to fetch the official
-# files at the commit pinned in provenance/sources.yaml, then these three
-# load real, distinct rows — nothing here repeats past `max_samples` the way
-# `synthetic` below does once you exceed its small fixed pool. `max_samples`
-# is a random subset drawn with benchmark.seed, not the first N rows.
+# pool. main.py downloads the official files at the commit pinned in
+# provenance/sources.yaml (sha256-verified) if they are missing, then these
+# three load real, distinct rows — nothing here repeats past `max_samples` the way
+# `synthetic` below does once you exceed its small fixed pool. Size comes
+# from run.samples_per_dataset (a dataset's own `max_samples` wins); it is a
+# random subset drawn with benchmark.seed, not the first N rows, and the
+# same subset is used in every run.
 datasets:
   - name: "halueval_qa"
     enabled: true
     source: "json"
     path: "external_data/HaluEval/data/qa_data.json"
-    max_samples: 50
     context_col: "knowledge"
     question_col: "question"
     right_answer_col: "right_answer"
@@ -71,7 +92,6 @@ datasets:
     enabled: true
     source: "json"
     path: "external_data/HaluEval/data/dialogue_data.json"
-    max_samples: 50
     context_col: "knowledge"
     # "dialogue_history" plays the role of "question" here: the prior turns
     # the assistant must respond to, per HaluEval's dialogue task.
@@ -83,7 +103,6 @@ datasets:
     enabled: true
     source: "json"
     path: "external_data/HaluEval/data/summarization_data.json"
-    max_samples: 50
     context_col: "document"
     # HaluEval's summarization split has no per-row question field. This
     # fixed instruction is local benchmark policy (see METHOD_SOURCES.md),
@@ -92,53 +111,121 @@ datasets:
     right_answer_col: "right_summary"
     hallucinated_answer_col: "hallucinated_summary"
 
+  # RAGTruth (ParticleMedia/RAGTruth, MIT): official test split, real answers
+  # from 6 LLMs per source with human-labeled hallucination spans. One entry
+  # per task type; each sample = one source with all of its model answers.
+  - name: "ragtruth_qa"
+    enabled: true
+    source: "ragtruth"
+    task_type: "QA"
+    responses_path: "external_data/RAGTruth/dataset/response.jsonl"
+    sources_path: "external_data/RAGTruth/dataset/source_info.jsonl"
+
+  - name: "ragtruth_summary"
+    enabled: true
+    source: "ragtruth"
+    task_type: "Summary"
+    responses_path: "external_data/RAGTruth/dataset/response.jsonl"
+    sources_path: "external_data/RAGTruth/dataset/source_info.jsonl"
+
+  - name: "ragtruth_data2txt"
+    enabled: true
+    source: "ragtruth"
+    task_type: "Data2txt"
+    responses_path: "external_data/RAGTruth/dataset/response.jsonl"
+    sources_path: "external_data/RAGTruth/dataset/source_info.jsonl"
+
+  # HaluBench (PatronusAI/HaluBench, CC-BY-NC-2.0: research use): PASS/FAIL
+  # labeled answers. Its HaluEval and RAGTruth parts are not used here (they
+  # come from their original sources above); these four add other domains.
+  - name: "halubench_drop"          # reading comprehension with numbers
+    enabled: true
+    source: "halubench"
+    source_ds: "DROP"
+    path: "external_data/HaluBench/test-00000-of-00001.parquet"
+
+  - name: "halubench_financebench"  # finance filings
+    enabled: true
+    source: "halubench"
+    source_ds: "FinanceBench"
+    path: "external_data/HaluBench/test-00000-of-00001.parquet"
+
+  - name: "halubench_covidqa"       # biomedical (COVID-19 papers)
+    enabled: true
+    source: "halubench"
+    source_ds: "covidQA"
+    path: "external_data/HaluBench/test-00000-of-00001.parquet"
+
+  - name: "halubench_pubmedqa"      # biomedical abstracts
+    enabled: true
+    source: "halubench"
+    source_ds: "pubmedQA"
+    path: "external_data/HaluBench/test-00000-of-00001.parquet"
+
   # Small fixed pool (8 contexts) that repeats once max_samples exceeds it —
   # engineering smoke data only, kept small on purpose. Do not report it as
   # a research result; the three HaluEval datasets above are the real data.
   - name: "synthetic"
-    enabled: true
+    enabled: false          # smoke fixture only; enable for plumbing tests
     source: "synthetic"
-    max_samples: 8
+    max_samples: 8          # its own cap: only 8 distinct items exist
 
+# The judge used by uqlm_judge and SelfCheckGPT's `prompt` scorer. It is
+# from a different model family than every generator above, so no model
+# grades its own answers. Pulled automatically like the generators.
+judge:
+  model: "mistral:7b"
+
+# Detector settings. Which detectors run comes from run.detectors (or
+# --detectors); sample count from run.selfcheckgpt_samples (or --n-samples).
+# Every score is oriented the same way: higher = more likely hallucinated.
+# Thresholds only affect accuracy/precision/recall/F1; AUROC/AUPRC are
+# threshold-free. None are calibrated yet (docs/REPRODUCIBILITY.md).
 detectors:
   selfcheckgpt:
-    enabled: false
-    method: "ngram"       # ngram is lightest; nli is the stronger checkpoint method
-    threshold: 3.0        # ngram score is unbounded; calibrate on validation data
-    n_samples: 5
-    temperature: 1.0
+    methods: ["ngram", "bertscore", "nli", "prompt"]   # all official SelfCheckGPT scorers
+    thresholds: {ngram: 3.0, bertscore: 0.5, nli: 0.5, prompt: 0.5}   # ngram is unbounded
+    temperature: 1.0      # sampling temperature (paper setting)
+    device: "cpu"         # bertscore / nli models; --device cuda on a GPU machine
+
+  uqlm:
+    scorers: ["semantic_negentropy", "noncontradiction", "entailment",
+              "cosine_sim", "exact_match", "bert_score"]
+    threshold: 0.5        # on risk = 1 − UQLM confidence
     device: "cpu"
 
+  uqlm_judge:
+    template: "true_false_uncertain"   # UQLM's default judge template
+    threshold: 0.5
+
   summac:
-    enabled: false
     threshold: 0.5
     device: "cpu"
     model_name: "vitc"
 
   minicheck:
-    enabled: false
     threshold: 0.5
     model_name: "flan-t5-large"
     cache_dir: "external_models/minicheck"
 
   alignscore:
-    enabled: false
     threshold: 0.5
     checkpoint_path: "external_models/alignscore/AlignScore-base.ckpt"
     device: "cpu"
     model_name: "roberta-base"
 
-# Stage B: local-inspired reduction baseline, scored with the SAME frozen
-# SelfCheckGPT detector configured above. Not an upstream reproduction — see
-# `self_refine` in provenance/sources.yaml and docs/MITIGATION_METHODS.md.
-# Disabled by default; enable with --reduce or reduction.enabled: true.
+# Stage B. Every method answers the same questions; each is compared with the
+# model's own grounded baseline answer on the same question, scored by every
+# detector against the same samples. See benchmark/reduction_runner.py and
+# provenance/sources.yaml for what each one is (official / local
+# implementation / setting).
 reduction:
-  enabled: false
-  # "_adapted" is not decorative: the code refuses "self_refine" alone so this
-  # can never be quoted as plain, unqualified "Self-Refine" in a results table.
-  method: "self_refine_adapted"
-  detector: "selfcheckgpt"   # only supported value today
-  max_iterations: 3
+  methods:
+    - closed_book           # no context: shows what RAG (the context) adds
+    - greedy                # temperature 0 decoding (a setting, not a paper method)
+    - self_refine_adapted   # Self-Refine loop, local inspired adaptation
+    - cove_adapted          # Chain-of-Verification (self-verification), local implementation
+    - uqlm_best_response    # UQLM semantic-entropy best-response selection (official)
 
 benchmark:
   output_dir: "results/current"

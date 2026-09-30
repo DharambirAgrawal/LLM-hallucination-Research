@@ -1,70 +1,94 @@
 """Thin adapter around the official SelfCheckGPT package.
 
-Upstream source and immutable revision are recorded in
-``provenance/sources.yaml``. Generation remains provider-independent: sampled
-passages can come from a remote Ollama server or another ``BaseModel`` backend.
-The upstream scoring implementation is not copied or reimplemented here.
+Upstream: https://github.com/potsawee/selfcheckgpt (commit pinned in
+provenance/sources.yaml). Paper: Manakul et al., EMNLP 2023.
 
-Sampled passages depend only on the generator and the prompt (question +
-context), never on the answer being checked. They are therefore drawn once
-per (generator, prompt) and reused: the factual and hallucinated answers of
-one sample, and the baseline/refined answers of the reduction stage, are all
-scored against the same stochastic samples. That is SelfCheckGPT's own
-setup (N samples per prompt, any number of responses checked against them),
-it makes paired comparisons lower-variance, and it avoids regenerating
-identical requests. Every sample set is kept for export to JSONL.
+Every official scorer the package ships is available, each run on the SAME
+sampled passages (detectors/sampling.py):
+
+  ngram      SelfCheckNgram(n=1)           unigram negative log-probability
+                                           (unbounded; not a probability)
+  bertscore  SelfCheckBERTScore(rescale_with_baseline=True)
+  nli        SelfCheckNLI                  DeBERTa-v3-large MNLI; the paper's
+                                           strongest non-LLM variant
+  prompt     SelfCheckAPIPrompt            the official LLM-prompt variant
+                                           ("Is the sentence supported by the
+                                           context above? Answer Yes or No."),
+                                           with a local Ollama model as the
+                                           judge through Ollama's OpenAI-
+                                           compatible endpoint
+
+The response is split into sentences with spaCy en_core_web_sm as in the
+upstream README; the response score is the mean of the upstream sentence
+scores (the paper's passage-level average). Upstream values are reported as
+returned, without clipping. Nothing in the scoring is reimplemented here.
 """
 from __future__ import annotations
 
 import contextlib
 import io
-import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Dict, List, Optional, Sequence, TYPE_CHECKING
 
 import numpy as np
+
+from detectors.sampling import SampleBank
 
 if TYPE_CHECKING:
     from models.base_model import BaseModel
 
+METHODS = ("ngram", "bertscore", "nli", "prompt")
+
 
 @dataclass
 class SelfCheckGPTResult:
-    score: float
+    score: float                                   # first configured method
     is_hallucinated: bool
     sentence_scores: List[float] = field(default_factory=list)
+    scores: Dict[str, float] = field(default_factory=dict)
+    errors: Dict[str, str] = field(default_factory=dict)   # scorer -> reason
 
 
 class SelfCheckGPTDetector:
-    """Run the official SelfCheckGPT NLI or BERTScore scorer."""
+    """Run one or more official SelfCheckGPT scorers on shared samples."""
 
     def __init__(
         self,
         model: Optional["BaseModel"] = None,
-        method: str = "nli",
+        method: str | Sequence[str] = "ngram",
         n_samples: int = 5,
         temperature: float = 1.0,
         threshold: float = 0.5,
         device: str = "cpu",
+        judge_model: Optional[str] = None,
+        judge_host: str = "http://localhost:11434",
+        bank: Optional[SampleBank] = None,
+        thresholds: Optional[Dict[str, float]] = None,
     ):
-        if method not in {"nli", "bertscore", "ngram"}:
-            raise ValueError(
-                "SelfCheckGPT method must be 'nli', 'bertscore', or 'ngram'"
-            )
+        self.methods = [method] if isinstance(method, str) else list(method)
+        unknown = set(self.methods) - set(METHODS)
+        if unknown or not self.methods:
+            raise ValueError(f"SelfCheckGPT methods must be among {METHODS}, got {self.methods}")
+        if "prompt" in self.methods and not judge_model:
+            raise ValueError("SelfCheckGPT 'prompt' needs a judge model (judge.model in config)")
+        self.method = self.methods[0]
         self.model = model
-        self.method = method
         self.n_samples = n_samples
         self.temperature = temperature
         self.threshold = threshold
+        self.thresholds = thresholds or {}
         self.device = device
-        self._scorer = None
+        self.judge_model = judge_model
+        self.judge_host = judge_host
+        self.bank = bank or SampleBank(n_samples, temperature)
+        self._scorers: Dict[str, object] = {}
         self._nlp = None
-        self._samples: Dict[Tuple[str, str], List[str]] = {}
 
     def _load(self):
-        if self._scorer is not None:
+        if self._scorers:
             return
         try:
             from selfcheckgpt.modeling_selfcheck import (
@@ -74,17 +98,24 @@ class SelfCheckGPTDetector:
             )
         except ImportError as exc:
             raise RuntimeError(
-                "SelfCheckGPT is not installed. Install the optional upstream "
-                "environment described in requirements-upstream.txt."
+                "SelfCheckGPT is not installed: pip install -r requirements.txt"
             ) from exc
-
+        # Upstream prints status lines on construction; keep them off screen.
         with contextlib.redirect_stdout(io.StringIO()):
-            if self.method == "nli":
-                self._scorer = SelfCheckNLI(device=self.device)
-            elif self.method == "bertscore":
-                self._scorer = SelfCheckBERTScore(rescale_with_baseline=True)
-            else:
-                self._scorer = SelfCheckNgram(n=1)
+            for method in self.methods:
+                if method == "ngram":
+                    self._scorers[method] = SelfCheckNgram(n=1)
+                elif method == "bertscore":
+                    self._scorers[method] = SelfCheckBERTScore(rescale_with_baseline=True)
+                elif method == "nli":
+                    self._scorers[method] = SelfCheckNLI(device=self.device)
+                elif method == "prompt":
+                    from selfcheckgpt.modeling_selfcheck_apiprompt import SelfCheckAPIPrompt
+                    # The official class builds `OpenAI()` from the environment;
+                    # point it at the local Ollama server's OpenAI-compatible API.
+                    os.environ["OPENAI_BASE_URL"] = f"{self.judge_host.rstrip('/')}/v1"
+                    os.environ.setdefault("OPENAI_API_KEY", "ollama")
+                    self._scorers[method] = SelfCheckAPIPrompt(client_type="openai", model=self.judge_model)
 
     def _sentences(self, answer: str) -> List[str]:
         """Split the response the way the upstream README does:
@@ -105,6 +136,18 @@ class SelfCheckGPTDetector:
             parts = re.split(r"(?<=[.!?])\s+", answer.strip())
         return [part.strip() for part in parts if part.strip()]
 
+    def _score_one(self, method: str, sentences: List[str], answer: str, samples: List[str]) -> List[float]:
+        scorer = self._scorers[method]
+        with contextlib.redirect_stdout(io.StringIO()):
+            if method == "ngram":
+                result = scorer.predict(sentences=sentences, passage=answer, sampled_passages=samples)
+                values = result["sent_level"]["avg_neg_logprob"]
+            elif method == "prompt":
+                values = scorer.predict(sentences=sentences, sampled_passages=samples, verbose=False)
+            else:
+                values = scorer.predict(sentences=sentences, sampled_passages=samples)
+        return [float(v) for v in np.asarray(values).reshape(-1)]
+
     def detect(
         self,
         question: str,
@@ -112,85 +155,51 @@ class SelfCheckGPTDetector:
         answer: str,
         model: Optional["BaseModel"] = None,
     ) -> SelfCheckGPTResult:
-        """Score one fixed answer. `model` overrides the constructor's model
-        for this call only, so one detector/scorer instance can be reused
-        across several generators instead of reloading a checkpoint per model."""
+        """Score one answer with every configured method. `model` overrides
+        the constructor's generator for this call only."""
         self._load()
         if not answer.strip():
             # No neutral score exists: n-gram scores are unbounded, so a
             # placeholder such as 1.0 would read as "very factual". Record
             # the case as a failure instead.
             raise ValueError("empty answer cannot be scored")
-
         generator = model or self.model
         if generator is None:
             raise ValueError(
                 "SelfCheckGPT needs a generator model, either bound at "
                 "construction or passed to detect(model=...)"
             )
-
-        prompt = (
-            "Answer the question based on the supplied context. Do not add "
-            "unsupported information.\n\n"
-            f"Context: {context}\n\nQuestion: {question}\n\nAnswer:"
-        )
-        samples = self._sample(generator, prompt)
-
-        score_kwargs = {
-            "sentences": self._sentences(answer),
-            "sampled_passages": samples,
-        }
-        if self.method == "ngram":
-            score_kwargs["passage"] = answer
-        # Upstream prints status lines ("SelfCheck-1gram initialized") on
-        # every call; keep them out of the terminal.
-        with contextlib.redirect_stdout(io.StringIO()):
-            sentence_scores = self._scorer.predict(**score_kwargs)
-        if self.method == "ngram":
-            # The official n-gram variant returns a nested dictionary and its
-            # negative-log-probability score is not bounded to [0, 1].
-            sentence_scores = sentence_scores["sent_level"]["avg_neg_logprob"]
-        values = [float(value) for value in np.asarray(sentence_scores).reshape(-1)]
-        if not values or not np.isfinite(values).all():
-            raise ValueError(f"upstream scorer returned a non-finite score: {values}")
-        score = float(np.mean(values))
-        if self.method != "ngram":
-            score = max(0.0, min(1.0, score))
+        samples = self.bank.get(generator, question, context)
+        sentences = self._sentences(answer)
+        # Each scorer fails on its own: e.g. upstream SelfCheckBERTScore
+        # raises IndexError when every sample is 3 tokens or shorter (it
+        # drops such sample sentences), which must not erase the others.
+        scores, errors, first_values = {}, {}, []
+        for method in self.methods:
+            try:
+                values = self._score_one(method, sentences, answer, samples)
+                if not values or not np.isfinite(values).all():
+                    raise ValueError(f"non-finite score: {values}")
+            except Exception as exc:
+                errors[method] = f"{type(exc).__name__}: {str(exc).strip() or repr(exc)}"
+                continue
+            scores[method] = float(np.mean(values))
+            if method == self.method:
+                first_values = values
+        if not scores:
+            raise RuntimeError("; ".join(f"{m}: {e}" for m, e in errors.items()))
+        score = scores.get(self.method, float("nan"))
         return SelfCheckGPTResult(
             score=score,
-            is_hallucinated=score >= self.threshold,
-            sentence_scores=values,
+            is_hallucinated=score >= self.thresholds.get(self.method, self.threshold),
+            sentence_scores=first_values,
+            scores=scores,
+            errors=errors,
         )
 
-    def _sample(self, generator: "BaseModel", prompt: str) -> List[str]:
-        key = (getattr(generator, "name", repr(generator)), prompt)
-        if key in self._samples:
-            return self._samples[key]
-        if hasattr(generator, "sample_n"):
-            samples = generator.sample_n(
-                prompt, n=self.n_samples, temperature=self.temperature
-            )
-        else:
-            samples = generator.generate_batch(
-                [prompt] * self.n_samples, temperature=self.temperature
-            )
-        samples = [sample for sample in samples if sample.strip()]
-        if not samples:
-            raise RuntimeError("Generator returned no SelfCheckGPT samples")
-        self._samples[key] = samples
-        return samples
+    # Kept for callers of the previous API.
+    def reset_samples(self) -> None:
+        self.bank.reset()
 
     def export_samples(self, path: Path) -> int:
-        """Write every sampled passage set to JSONL (one line per model and
-        prompt) so the exact generations behind each score are archived."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as handle:
-            for (model_name, prompt), samples in self._samples.items():
-                handle.write(json.dumps({
-                    "model": model_name,
-                    "temperature": self.temperature,
-                    "n_samples": len(samples),
-                    "prompt": prompt,
-                    "samples": samples,
-                }, ensure_ascii=False) + "\n")
-        return len(self._samples)
+        return self.bank.export(path)

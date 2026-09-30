@@ -2,7 +2,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://www.python.org/)
 [![Methods](https://img.shields.io/badge/methods-pinned%20upstream-0B6E75.svg)](provenance/sources.yaml)
-[![Models](https://img.shields.io/badge/LLM-local%20or%20API-F28C28.svg)](config.remote.example.yaml)
+[![Models](https://img.shields.io/badge/LLM-local%20Ollama-F28C28.svg)](config.yaml)
 [![Status](https://img.shields.io/badge/status-n--gram%20smoke%20verified-2E7D32.svg)](#research-status)
 
 A lightweight research harness for validating published hallucination detectors
@@ -16,9 +16,9 @@ one consistent data and evaluation interface.
 
 ![Research pipeline: labeled data flows through official detectors and validation before a reduction study.](assets/diagrams/research-pipeline.png)
 
-*Figure 1. Intended research workflow. The remote generator is needed only for
-SelfCheckGPT sampling. Every reported run must preserve its source, license,
-checkpoint, and environment metadata.*
+*Figure 1. Intended research workflow. The local Ollama generators are needed
+for SelfCheckGPT sampling and the reduction stage. Every reported run must
+preserve its source, license, checkpoint, and environment metadata.*
 
 ## Research objective
 
@@ -30,10 +30,11 @@ The project separates two questions that should not be mixed:
    mitigation method improve paired model outputs without unacceptable losses
    in correctness, relevance, latency, or cost?
 
-No LLM or detector checkpoint is downloaded by the default controller workflow.
-Generation may run on another computer through Ollama or through an
-OpenAI-compatible API, or on the Colab evaluator with the pinned small Qwen
-example in [`config.local-colab.example.yaml`](config.local-colab.example.yaml).
+Every run first downloads (and checksum-verifies) any missing data, pulls
+missing Ollama models, and runs a one-case preflight of the whole pipeline;
+see [`docs/HOW_TO_RUN.md`](docs/HOW_TO_RUN.md#1-how-every-run-protects-your-time).
+Everything runs locally: the generator models are served by Ollama, and the
+detectors run in local Python environments.
 
 ## Official detectors
 
@@ -43,26 +44,31 @@ example in [`config.local-colab.example.yaml`](config.local-colab.example.yaml).
 SelfCheckGPT measures consistency across sampled generations; MiniCheck,
 SummaC, and AlignScore measure support against supplied evidence.*
 
-| Method | What the official method measures | Paper | Code | License | Current status |
-|---|---|---|---|---|---|
-| **SelfCheckGPT** | Sentence-level inconsistency against stochastic responses from the same generator | [Manakul et al., 2023](https://aclanthology.org/2023.emnlp-main.557/) | [Official repository](https://github.com/potsawee/selfcheckgpt) | MIT | Official n-gram integration verified; NLI/BERTScore checkpoints pending |
-| **MiniCheck** | Sentence-level factual support from a grounding document | [Tang et al., 2024](https://aclanthology.org/2024.emnlp-main.499/) | [Official repository](https://github.com/Liyan06/MiniCheck) | Apache-2.0 | Adapter integrated; runtime validation pending |
-| **SummaC** | NLI-based document–response consistency | [Laban et al., 2022](https://aclanthology.org/2022.tacl-1.10/) | [Official repository](https://github.com/tingofurro/summac) | Apache-2.0 | Adapter integrated; isolated environment required |
-| **AlignScore** | Information alignment between context chunks and response claims | [Zha et al., 2023](https://aclanthology.org/2023.acl-long.634/) | [Official repository](https://github.com/yuh-zha/AlignScore) | MIT | Adapter integrated; checkpoint and isolated environment required |
+Every detector below runs from its official package at a pinned version; the
+files under `detectors/` are thin adapters. Full details, including every
+setting chosen and why: [`METHOD_SOURCES.md`](METHOD_SOURCES.md).
 
-The local files under `detectors/` are adapters only. Exact reviewed commits are
-recorded in [`provenance/sources.yaml`](provenance/sources.yaml). Model and
-tokenizer artifact hashes must also be recorded before publishing results.
+| Method | What it measures | Paper | Code | License |
+|---|---|---|---|---|
+| **SelfCheckGPT** (n-gram, BERTScore, NLI, LLM prompt) | Consistency of an answer with other answers the same model gives to the same prompt | [Manakul et al., 2023](https://aclanthology.org/2023.emnlp-main.557/) | [potsawee/selfcheckgpt](https://github.com/potsawee/selfcheckgpt) | MIT |
+| **UQLM** consistency (semantic entropy, non-contradiction, entailment, cosine, exact match, BERTScore) | Agreement between the answer and the model's sampled answers | [Bouchard et al., 2025](https://arxiv.org/abs/2507.06196); semantic entropy: [Farquhar et al., 2024](https://doi.org/10.1038/s41586-024-07421-0) | [cvs-health/uqlm](https://github.com/cvs-health/uqlm) | Apache-2.0 |
+| **UQLM LLM-as-a-judge** | A separate judge model grades the answer against the context | [Bouchard et al., 2025](https://arxiv.org/abs/2507.06196) | [cvs-health/uqlm](https://github.com/cvs-health/uqlm) | Apache-2.0 |
+| **MiniCheck** | Sentence-level support from the grounding document | [Tang et al., 2024](https://aclanthology.org/2024.emnlp-main.499/) | [Liyan06/MiniCheck](https://github.com/Liyan06/MiniCheck) | Apache-2.0 |
+| **SummaC** | NLI-based document–answer consistency | [Laban et al., 2022](https://aclanthology.org/2022.tacl-1.10/) | [tingofurro/summac](https://github.com/tingofurro/summac) | Apache-2.0 |
+| **AlignScore** (opt-in) | Information alignment between context and answer | [Zha et al., 2023](https://aclanthology.org/2023.acl-long.634/) | [yuh-zha/AlignScore](https://github.com/yuh-zha/AlignScore) | MIT |
 
-The previous token-overlap, semantic-cosine, prompted LLM-judge, BERT stochastic,
-and ensemble implementations were removed. They are not alternate names for
-the official methods above.
+Earlier versions of this repository had locally written token-overlap,
+semantic-cosine, LLM-judge and BERT-stochastic detectors (after an AWS blog
+post that publishes no code). They were removed; the published methods they
+imitated now run from official code above.
 
 ## Evaluation protocol
 
-For every source example, the loader creates a matched factual case
-(`label = 0`) and hallucinated case (`label = 1`). Detectors score the same fixed
-responses; they do not generate replacement answers during validation.
+Each question comes with answers whose label is known (`label = 0` faithful,
+`label = 1` hallucinated): HaluEval's correct/hallucinated pairs, RAGTruth's
+human-annotated answers from six LLMs, and HaluBench's PASS/FAIL answers.
+Detectors score these fixed answers; they do not generate replacements during
+validation.
 
 The planned protocol is:
 
@@ -73,111 +79,61 @@ The planned protocol is:
 5. confirm a representative subset through blinded human review;
 6. only then use the detector in paired reduction experiments.
 
-### Candidate datasets
+### Datasets
 
 | Dataset | Role | Paper | Official source | Status |
 |---|---|---|---|---|
-| **HaluEval** | Matched factual/hallucinated QA, dialogue, and summarization responses | [Li et al., 2023](https://aclanthology.org/2023.emnlp-main.397/) | [RUCAIBox/HaluEval](https://github.com/RUCAIBox/HaluEval) | Wired in as 3 datasets (`halueval_qa`/`_dialogue`/`_summarization`); run `python scripts/prepare_halueval.py` once to fetch the pinned files |
-| **RAGTruth** | Human response- and span-level RAG hallucination annotations | [Niu et al., 2024](https://aclanthology.org/2024.acl-long.585/) | [ParticleMedia/RAGTruth](https://github.com/ParticleMedia/RAGTruth) | Planned |
-| **TRUE** | Factual-consistency meta-evaluation collection | [Honovich et al., 2022](https://aclanthology.org/2022.naacl-main.287/) | [google-research/true](https://github.com/google-research/true) | Planned |
-| **LLM-AggreFact** | Aggregated grounded fact-checking benchmark released with MiniCheck | [Tang et al., 2024](https://aclanthology.org/2024.emnlp-main.499/) | [Hugging Face dataset](https://huggingface.co/datasets/lytang/LLM-AggreFact) | Revision must be pinned before use |
+| **HaluEval** (QA, dialogue, summarization) | Matched correct/hallucinated answers | [Li et al., 2023](https://aclanthology.org/2023.emnlp-main.397/) | [RUCAIBox/HaluEval](https://github.com/RUCAIBox/HaluEval) | In use |
+| **RAGTruth** (QA, summaries, data-to-text) | Real answers from 6 LLMs with human span-level labels (test split) | [Niu et al., 2024](https://aclanthology.org/2024.acl-long.585/) | [ParticleMedia/RAGTruth](https://github.com/ParticleMedia/RAGTruth) | In use |
+| **HaluBench** (DROP, FinanceBench, CovidQA, PubMedQA) | PASS/FAIL-labeled answers in finance, biomedical and numeric reading | [Ravi et al., 2024](https://arxiv.org/abs/2407.08488) | [PatronusAI/HaluBench](https://huggingface.co/datasets/PatronusAI/HaluBench) | In use (CC-BY-NC-2.0, research only) |
+| **LLM-AggreFact** | Grounded fact-checking benchmark released with MiniCheck | [Tang et al., 2024](https://aclanthology.org/2024.emnlp-main.499/) | [Hugging Face](https://huggingface.co/datasets/lytang/LLM-AggreFact) | Not used: gated download (login) |
+| **TRUE** | Factual-consistency meta-evaluation collection | [Honovich et al., 2022](https://aclanthology.org/2022.naacl-main.287/) | [google-research/true](https://github.com/google-research/true) | Not used: its datasets must be collected from many separate sources |
 
-## Reduction-method status
+All data is downloaded by the run from its pinned source and SHA-256 verified.
 
-One **local inspired baseline** is active: a generic-QA adaptation of
-Self-Refine (`reducers/self_refine.py`), scored with the same frozen
-SelfCheckGPT detector used for validation above. It is explicitly not an
-upstream reproduction — see
-[`docs/MITIGATION_METHODS.md`](docs/MITIGATION_METHODS.md#active-integration-self-refine-adaptation-local-inspired-baseline)
-before reporting any result from it. This label discipline prevents locally
-written prompting code from being mislabeled as a reproduction.
+## Reduction methods
 
-| Candidate | Official source | Decision |
+Every method answers the same questions with the same models, and every
+answer is compared with the model's own grounded baseline answer on the same
+question, by every detector. Each row of the results carries a
+`reproduction_status` saying exactly what the method is.
+
+| Method | Source | Status |
 |---|---|---|
-| **Self-Refine** | [Paper](https://proceedings.neurips.cc/paper_files/paper/2023/hash/91edff07232fb1b55a505a9e9f6c0ff3-Abstract-Conference.html) · [Code](https://github.com/madaan/self-refine) | Integrated as a local inspired baseline (not upstream); upstream tasks and prompts are specialized |
-| **Self-RAG** | [Paper](https://openreview.net/forum?id=hSyW5go0v8) · [Code](https://github.com/AkariAsai/self-rag) | Reference only; requires the trained model, reflection tokens, and retrieval workflow |
-| **RARR** | [Paper](https://aclanthology.org/2023.acl-long.910/) · [Code](https://github.com/anthonywchen/RARR) | Reference only; repository license must be clarified before vendoring |
-| **AWS contextual grounding** | [Service documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/guardrails-contextual-grounding-check.html) · [AWS examples](https://github.com/aws-samples/responsible_ai_reduce_hallucinations_for_genai_apps) | Possible managed-service baseline; report separately from open-source methods |
+| **closed_book** vs. baseline | RAG, [Lewis et al., 2020](https://arxiv.org/abs/2005.11401) | Ablation: the same question without the context shows what retrieval adds |
+| **greedy** | — | Decoding setting (temperature 0), not a published method |
+| **self_refine_adapted** | [Madaan et al., 2023](https://arxiv.org/abs/2303.17651) · [code](https://github.com/madaan/self-refine) | Local inspired adaptation (official code is task-specific) |
+| **cove_adapted** | [Dhuliawala et al., 2023](https://arxiv.org/abs/2309.11495) | Local implementation of the paper's method; no official code exists |
+| **uqlm_best_response** | [UQLM](https://github.com/cvs-health/uqlm) semantic entropy | Official implementation |
+| Self-RAG | [code](https://github.com/AkariAsai/self-rag) | Not used: needs its own trained model |
+| RARR | [code](https://github.com/anthonywchen/RARR) | Not used: no license declared, needs a search API |
 
 The full decision record is in
 [`docs/MITIGATION_METHODS.md`](docs/MITIGATION_METHODS.md).
 
-## Running safely
+## Running
 
-For the full run reference — every config knob, the multi-model detector
-loop, the Self-Refine reduction stage, and the one-command
-`scripts/run_full.py` that runs every detector in its own isolated venv and
-produces a combined CSV/chart/report — see
-[`docs/HOW_TO_RUN.md`](docs/HOW_TO_RUN.md).
-
-Configuration and data check on the development computer—no detector model or
-API request:
+Setup, the smoke test, the full run, and what every output file contains are
+in [`docs/HOW_TO_RUN.md`](docs/HOW_TO_RUN.md). In short:
 
 ```bash
-python main.py --dry-run
+pip install -r requirements.txt       # the one install; Ollama itself is a system install
+python main.py --detectors selfcheckgpt --reduce \
+  --runs 2 --max-samples 2 --n-samples 2 --max-iterations 1 \
+  --output results/smoke-test         # smoke test: same outputs as the full run
+python scripts/run_full.py            # the full run: config.yaml's `run:` block
 ```
 
-Reusable offline integration tests mock the external packages and HTTP response;
-they verify adapter contracts, CSV generation, metrics, provenance, figures,
-documentation links, and API payload construction without an LLM:
+How big a run is (runs, samples per dataset, detectors, SelfCheckGPT
+samples, reduction rounds) is set in one place: the `run:` block at the top
+of [`config.yaml`](config.yaml).
+
+Offline tests (no LLM, no downloads) check adapter contracts, metrics,
+reports, downloads/checksums, provenance and documentation links:
 
 ```bash
 python -m unittest discover -s tests -v
 ```
-
-Lightweight official SelfCheckGPT n-gram integration check in Google Colab:
-
-```bash
-pip install -r requirements-colab-smoke.txt
-python official_smoke.py selfcheckgpt
-```
-
-MiniCheck in a GPU Colab runtime:
-
-```bash
-pip install -r requirements-colab-minicheck.txt
-python official_smoke.py minicheck
-python main.py --detectors minicheck --output results/colab-minicheck
-```
-
-Copy-ready notebook cells and environment warnings are in
-[`docs/COLAB.md`](docs/COLAB.md).
-
-## Remote model or API
-
-SelfCheckGPT requires repeated generations. Configure either remote Ollama or an
-OpenAI-compatible `/chat/completions` endpoint using
-[`config.remote.example.yaml`](config.remote.example.yaml). API keys are read
-from the environment variable named by `api_key_env`; secrets and model weights
-must never be committed.
-
-MiniCheck, SummaC, and AlignScore evaluate existing context–answer pairs and do
-not need access to the generator.
-
-### Small free-tier API test
-
-Copy [`.env.example`](.env.example) to `.env` and add keys locally, or use
-Colab Secrets. The tested default combines `gemini-3.5-flash-lite` and
-`gemini-3.5-flash`; both are listed in Google's free tier. It makes exactly
-eight short completion calls and runs the pinned official SelfCheckGPT n-gram
-implementation on their outputs:
-
-```bash
-python3 -m venv .venv-provider-test
-.venv-provider-test/bin/python -m pip install -r requirements-colab-smoke.txt
-.venv-provider-test/bin/python scripts/provider_selfcheck_smoke.py
-```
-
-The JSON report is written to `results/provider-selfcheck-smoke.json`. Select a
-single integration with `--providers gemini`, `--providers gemini-flash`,
-`--providers openrouter`, or `--providers mistral`. OpenRouter uses the official
-`openrouter/free` router. Mistral uses `mistral-small-latest`, but API access
-still depends on the account's Studio subscription/free-mode activation.
-
-The values are official SelfCheckGPT n-gram scores, but the tiny fixture and
-uncalibrated threshold make this an engineering check—not a reportable detector
-result. [`config.gemini.example.yaml`](config.gemini.example.yaml) shows how to
-plug the same remote model into `main.py`.
 
 ## Research status
 
@@ -185,12 +141,9 @@ plug the same remote model into `main.py`.
 |---|---|
 | Official source review and immutable Git revisions | Complete |
 | Thin adapters and common result schema | Complete |
-| Local/API generator connectivity | Gemini API verified with two free-tier models (2026-09-13) |
-| Colab smoke workflow | Copy-ready; local equivalent verified |
-| Detector checkpoint/runtime reproduction | SelfCheckGPT n-gram verified; neural variants pending |
+| Detector runtime | SelfCheckGPT (all 4 scorers) and UQLM (all scorers + judge) verified on real data; MiniCheck/SummaC/AlignScore verified only through their adapters and the preflight |
 | Held-out official-dataset validation | Pending |
-| Local inspired reduction baseline (Self-Refine adaptation) | Active (2026-09-15); paired smoke comparison only, not Stage B evidence |
-| Official reduction-method integration | Not started |
+| Reduction methods | closed_book, greedy, self_refine_adapted, cove_adapted, uqlm_best_response; engineering comparison only, not Stage B evidence |
 | Proposed-method comparison | Not started |
 
 This table should be updated with evidence after each successful run. A method
@@ -199,23 +152,28 @@ is not “reproduced” merely because its adapter imports successfully.
 ## Repository structure
 
 ```text
+config.yaml                      the one configuration (run plan at the top)
+requirements.txt                 the one install (controller + SelfCheckGPT)
+requirements/                    isolated per-detector envs, installed by run_full.py
 assets/diagrams/                 original README figures
 benchmark/runner.py              fixed-response orchestration (all selected models)
 benchmark/detector_validation.py labeled evaluation metrics
 benchmark/reduction_runner.py    Stage B: paired baseline vs. reduced-answer comparison
 data/datasets.py                 normalized paired cases
 detectors/                       thin upstream-package adapters
-reducers/self_refine.py          local-inspired Self-Refine adaptation (not upstream)
-models/                          remote Ollama, API, and replay adapters
+reducers/                        self_refine (adapted), cove (local impl.), uqlm_best_response (official)
+detectors/sampling.py            samples shared by every sampling-based detector
+models/prompts.py                the grounded / closed-book prompts every stage shares
+models/                          local Ollama adapter (+ replay model for tests)
 utils/console.py                 terminal layout, progress bars, run.log
 utils/run_manifest.py            run_manifest.json / config_used.yaml / environment.txt
-config.local-colab.example.yaml  no-API local Qwen smoke configuration
 scripts/run_full.py              runs every detector (own venv) + reduction, one report
-scripts/generate_report.py       charts + REPORT.md for any run folder (main.py calls it)
-scripts/prepare_halueval.py      fetches official HaluEval QA/dialogue/summarization data
-scripts/provider_selfcheck_smoke.py bounded free-tier API integration test
+reporting/                       per-run + combined reports: report.docx/.html/REPORT.md, charts, tables
+scripts/generate_report.py       rebuild reports for an existing results folder
+utils/resources.py               pinned downloads (HaluEval, AlignScore ckpt) + checksums
+benchmark/preflight.py           one-case check of every detector/model before long stages
+scripts/prepare_halueval.py      optional: pre-download HaluEval only
 provenance/sources.yaml          commits, licenses, and integration status
-docs/COLAB.md                    copy/paste Colab workflow
 docs/REPRODUCIBILITY.md          provenance and experiment policy
 docs/MITIGATION_METHODS.md       reduction-method decisions
 CITATION.bib                     paper citations used by this project

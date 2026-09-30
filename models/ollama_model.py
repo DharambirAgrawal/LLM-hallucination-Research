@@ -9,7 +9,8 @@ driver setup — Ollama handles everything.
 
 Features
 --------
-- Auto-pull:  optionally pulls the model if not installed
+- Pull:       OllamaModel.pull() downloads a missing model with a progress
+              bar (models/model_factory.py decides when)
 - Chat API:   uses /api/chat so chat templates apply automatically
 - Stochastic: sample_n() generates N diverse outputs for SelfCheckGPT
 - Reasoning:  `think` is passed through and any <think>...</think> block is
@@ -39,7 +40,6 @@ class OllamaModel(BaseModel):
       - model:      Ollama model tag  (e.g. "llama3.1:8b")
       - host:       Ollama server URL (default http://localhost:11434)
       - timeout:    request timeout in seconds (default 120)
-      - auto_pull:  pull model if not present (default False)
       - temperature: default sampling temperature (default 0.7)
       - max_tokens:  max tokens to generate (default 512)
       - think:       reasoning setting for thinking models (false, true,
@@ -53,7 +53,6 @@ class OllamaModel(BaseModel):
         self.model_tag   = config["model"]
         self.host        = config.get("host", ollama_host)
         self.timeout     = config.get("timeout", 120)
-        self.auto_pull   = config.get("auto_pull", False)
         self.temperature = config.get("temperature", 0.7)
         self.max_tokens  = config.get("max_tokens", 512)
         self.family      = config.get("family", "unknown")
@@ -64,10 +63,6 @@ class OllamaModel(BaseModel):
         # every HTTP request so a stuck server cannot hang the run forever.
         import ollama as _ollama
         self._client = _ollama.Client(host=self.host, timeout=self.timeout)
-
-        # Optionally auto-pull
-        if self.auto_pull:
-            self._pull_if_missing()
 
     # ── public API ────────────────────────────────────────────
 
@@ -147,31 +142,21 @@ class OllamaModel(BaseModel):
 
         raise RuntimeError(f"{self.name}: {last_error}")
 
-    def _pull_if_missing(self):
-        """Pull the model from Ollama registry if not already present."""
-        try:
-            models = self._client.list()
-            installed = {m["model"] for m in models.get("models", [])}
-            # Normalize: "llama3.1:8b" might appear as "llama3.1:8b" or similar
-            tag = self.model_tag
-            if not any(tag in m for m in installed):
-                logger.info(f"  Pulling model: {tag} ...")
-                for progress in self._client.pull(tag, stream=True):
-                    status = progress.get("status", "")
-                    if status in ("success", "pulling manifest"):
-                        logger.info(f"    {status}")
-                logger.info(f"  ✓ {tag} ready")
-            else:
-                logger.info(f"  ✓ {tag} already installed")
-        except Exception as e:
-            logger.warning(f"  Could not check/pull {self.model_tag}: {e}")
-
     # ── convenience ───────────────────────────────────────────
 
     @staticmethod
     def list_installed(host: str = "http://localhost:11434") -> List[str]:
         """Return list of all installed Ollama model tags."""
         return list(OllamaModel.installed_details(host))
+
+    @staticmethod
+    def server_reachable(host: str) -> bool:
+        import ollama as _ollama
+        try:
+            _ollama.Client(host=host, timeout=10).list()
+            return True
+        except Exception:
+            return False
 
     @staticmethod
     def installed_details(host: str = "http://localhost:11434") -> Dict[str, dict]:
@@ -185,7 +170,7 @@ class OllamaModel(BaseModel):
         try:
             result = client.list()
         except Exception as e:
-            logger.error(f"Cannot connect to Ollama at {host}: {e}")
+            logger.debug(f"Cannot connect to Ollama at {host}: {e}")
             return {}
         details = {}
         for m in result.get("models", []):
@@ -196,6 +181,34 @@ class OllamaModel(BaseModel):
                 "quantization_level": info.get("quantization_level"),
             }
         return details
+
+    @staticmethod
+    def pull(host: str, tag: str) -> None:
+        """Download `tag` into the Ollama server with one progress bar.
+
+        Ollama streams per-layer progress; the bar sums every layer so the
+        whole model is one bar with one ETA.
+        """
+        import ollama as _ollama
+        from utils import console
+
+        client = _ollama.Client(host=host)
+        totals: Dict[str, int] = {}
+        done: Dict[str, int] = {}
+        bar = console.download_bar(f"ollama pull {tag}", None)
+        try:
+            for update in client.pull(tag, stream=True):
+                digest = update.get("digest")
+                if digest and update.get("total"):
+                    totals[digest] = update["total"]
+                    done[digest] = update.get("completed") or 0
+                    bar.total = sum(totals.values())
+                    bar.n = sum(done.values())
+                    bar.refresh()
+                if update.get("status") == "success":
+                    break
+        finally:
+            bar.close()
 
     def __repr__(self) -> str:
         return f"OllamaModel(name={self.name!r}, model={self.model_tag!r}, family={self.family!r})"

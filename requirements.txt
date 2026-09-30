@@ -1,9 +1,19 @@
-# Controller only. It contains no detector models or checkpoints.
-ollama>=0.2.0
-pyyaml>=6.0
-pandas>=2.2.0
-numpy>=1.26.0
-scikit-learn>=1.4.0
-tqdm>=4.66.0
-loguru>=0.7.2
-matplotlib>=3.8.0
+# The one install for this project (docs/HOW_TO_RUN.md §0.3):
+#   pip install -r requirements.txt
+# Controller + the sampling-based detectors and the judge, which share the
+# generator samples and so run in one environment. MiniCheck / SummaC /
+# AlignScore pin conflicting torch/transformers versions, so
+# scripts/run_full.py installs each into its own venv from
+# requirements/<detector>.txt automatically.
+-r requirements/base.txt
+
+# SelfCheckGPT, official package at the reviewed commit (provenance/sources.yaml)
+selfcheckgpt @ git+https://github.com/potsawee/selfcheckgpt.git@19b492a2a380931bf1ed0ca94a9565c9aa7b03e1
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+sentencepiece>=0.2.0   # SelfCheckNLI's DeBERTa-v3 tokenizer (not declared by selfcheckgpt)
+protobuf>=4.25.0
+openai>=1.40.0         # SelfCheckAPIPrompt (official prompt scorer) → local Ollama /v1
+
+# UQLM, official package (provenance/sources.yaml); pins transformers<5, numpy<2
+uqlm==0.6.6
+langchain-ollama>=0.3.0   # UQLM's LLM judge talks to the local Ollama server

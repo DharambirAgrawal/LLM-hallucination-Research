@@ -14,7 +14,9 @@ from loguru import logger
 
 from utils import console
 
-DETECTOR_NAMES = ("selfcheckgpt", "summac", "minicheck", "alignscore")
+DETECTOR_NAMES = ("selfcheckgpt", "uqlm", "uqlm_judge", "minicheck", "summac", "alignscore")
+SAMPLING_DETECTORS = ("selfcheckgpt", "uqlm")      # need generator samples
+JUDGE_DETECTORS = ("uqlm_judge",)                  # need the judge model
 MODEL_INDEPENDENT = "n/a (model-independent detector)"
 
 
@@ -26,24 +28,31 @@ def parse_args() -> argparse.Namespace:
         "--detectors",
         nargs="+",
         choices=DETECTOR_NAMES,
-        help="Enable only the named official detector adapters",
+        help="Detectors to run (run.detectors)",
     )
     parser.add_argument(
-        "--reduce",
-        action="store_true",
-        help="Also run the configured reduction.method after detector validation",
+        "--runs", type=int,
+        help="Independent repeats (run.runs): run_01 … run_N, then combined/ with mean ± std",
+    )
+    parser.add_argument(
+        "--reduce", action="store_true",
+        help="Run the reduction stage (default: run.reduce)",
+    )
+    parser.add_argument(
+        "--no-reduce", action="store_true",
+        help="Skip the reduction stage even if run.reduce is true",
     )
     parser.add_argument(
         "--max-samples", type=int,
-        help="Override every dataset's max_samples (use a small number for a smoke run)",
+        help="Samples per dataset for every dataset (run.samples_per_dataset); small for a smoke run",
     )
     parser.add_argument(
         "--n-samples", type=int,
-        help="Override detectors.selfcheckgpt.n_samples (generations per case)",
+        help="SelfCheckGPT samples per question (run.selfcheckgpt_samples)",
     )
     parser.add_argument(
         "--max-iterations", type=int,
-        help="Override reduction.max_iterations (feedback/refine steps)",
+        help="Max feedback → refine rounds (run.reduction_iterations)",
     )
     parser.add_argument(
         "--device", choices=("cpu", "cuda"),
@@ -53,9 +62,22 @@ def parse_args() -> argparse.Namespace:
              "— this flag does not affect Ollama.",
     )
     parser.add_argument(
+        "--score-reduction-from",
+        help="Folder of a sampling-detector run (with run_XX/reduction_comparison.csv): "
+             "also score its reduction answers with this run's detectors. Used by "
+             "scripts/run_full.py for detectors that live in their own venv.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Validate configuration and data without importing detector packages",
+        help="Report what is present and what would be downloaded; download "
+             "and load nothing",
+    )
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="Download everything, run every check on one real case, print "
+             "the time estimate, then stop (no long stage is started)",
     )
     return parser.parse_args()
 
@@ -69,31 +91,66 @@ def load_config(path: str) -> dict:
     return config
 
 
-def apply_overrides(config: dict, args: argparse.Namespace) -> None:
+def apply_plan(config: dict, args: argparse.Namespace) -> dict:
+    """Resolve the run plan: command-line flag > setting in its own config
+    section > `run:` block. Writes the resolved values back into the
+    sections the code reads, and returns the plan that is printed and saved."""
+    plan = config.setdefault("run", {})
+    detectors_cfg = config["detectors"]
     if args.output:
         config["benchmark"]["output_dir"] = args.output
-    if args.detectors:
-        selected = set(args.detectors)
-        for name in DETECTOR_NAMES:
-            config["detectors"].setdefault(name, {})["enabled"] = name in selected
-    if args.reduce:
-        config["reduction"]["enabled"] = True
-    if args.max_samples is not None:
-        for dataset_cfg in config.get("datasets", []):
-            dataset_cfg["max_samples"] = args.max_samples
+
+    selected = (args.detectors or plan.get("detectors")
+                or [n for n in DETECTOR_NAMES if detectors_cfg.get(n, {}).get("enabled")])
+    for name in DETECTOR_NAMES:
+        detectors_cfg.setdefault(name, {})["enabled"] = name in selected
+
+    for ds in config.get("datasets", []):
+        if args.max_samples is not None:
+            ds["max_samples"] = args.max_samples
+        else:
+            ds.setdefault("max_samples", plan.get("samples_per_dataset", 50))
+
+    sc = detectors_cfg["selfcheckgpt"]
     if args.n_samples is not None:
-        config["detectors"].setdefault("selfcheckgpt", {})["n_samples"] = args.n_samples
+        sc["n_samples"] = args.n_samples
+    sc.setdefault("n_samples", plan.get("selfcheckgpt_samples", 5))
+
+    red = config["reduction"]
     if args.max_iterations is not None:
-        config["reduction"]["max_iterations"] = args.max_iterations
+        red["max_iterations"] = args.max_iterations
+    red.setdefault("max_iterations", plan.get("reduction_iterations", 3))
+    # Reduction needs generators, which only the sampling-based detectors bring.
+    red["enabled"] = (any(n in selected for n in SAMPLING_DETECTORS) and not args.no_reduce
+                      and bool(args.reduce or plan.get("reduce", False) or red.get("enabled")))
+
     if args.device:
         for name in ("selfcheckgpt", "summac", "alignscore"):
-            config["detectors"].setdefault(name, {})["device"] = args.device
+            detectors_cfg[name]["device"] = args.device
+
+    resolved = {
+        "runs": max(1, int(args.runs if args.runs is not None else plan.get("runs", 1))),
+        "detectors": [n for n in DETECTOR_NAMES if n in selected],
+        "samples_per_dataset": {ds["name"]: ds["max_samples"] for ds in config.get("datasets", [])
+                                if ds.get("enabled", True)},
+        "selfcheckgpt_samples": sc["n_samples"],
+        "reduce": red["enabled"],
+        "reduction_methods": list(red.get("methods") or []) if red["enabled"] else [],
+        "reduction_iterations": red["max_iterations"],
+    }
+    config["run"] = resolved
+    return resolved
 
 
-def describe_detector(name: str, cfg: dict) -> str:
+def describe_detector(name: str, cfg: dict, judge: dict) -> str:
     if name == "selfcheckgpt":
-        return (f"{cfg.get('method', 'ngram')} · n_samples={cfg.get('n_samples', 5)} · "
-                f"temperature={cfg.get('temperature', 1.0)} · threshold={cfg.get('threshold', 0.5)}")
+        methods = cfg.get("methods") or [cfg.get("method", "ngram")]
+        text = f"{', '.join(methods)} · temperature={cfg.get('temperature', 1.0)}"
+        return text + (f" · prompt judge={judge.get('model')}" if "prompt" in methods else "")
+    if name == "uqlm":
+        return ", ".join(cfg.get("scorers") or ["default scorers"])
+    if name == "uqlm_judge":
+        return f"judge={judge.get('model')} · template={cfg.get('template', 'true_false_uncertain')}"
     parts = [f"model={cfg.get('model_name', 'default')}", f"threshold={cfg.get('threshold', 0.5)}"]
     if "device" in cfg:
         parts.append(f"device={cfg['device']}")
@@ -107,35 +164,30 @@ def print_table(frame: pd.DataFrame) -> None:
 
 
 def summarise(raw: pd.DataFrame, runner) -> pd.DataFrame:
+    """Metrics per score column: per model for generator-dependent
+    detectors, once per case for the others."""
     from benchmark import DetectorValidator
 
     thresholds = runner.thresholds()
-    score_columns = list(thresholds)
+    per_model = [c for c in runner.generator_columns() if c in raw.columns and raw[c].notna().any()]
+    shared = [c for c in thresholds if c not in runner.generator_columns()
+              and c in raw.columns and raw[c].notna().any()]
     has_model_column = "model" in raw.columns and raw["model"].notna().any()
     frames = []
-
-    # SelfCheckGPT varies by generator, so report it once per model.
-    if "selfcheckgpt_score" in score_columns and has_model_column:
+    if per_model and has_model_column:
         for model_name, group in raw.groupby("model", sort=False):
-            if group["selfcheckgpt_score"].notna().any():
-                per_model = DetectorValidator().evaluate_frame(
-                    group, ["selfcheckgpt_score"],
-                    {"selfcheckgpt_score": thresholds["selfcheckgpt_score"]},
-                )
-                per_model["model"] = model_name
-                frames.append(per_model)
-    other = [c for c in score_columns if c != "selfcheckgpt_score" and raw[c].notna().any()]
-
-    # Model-independent detectors are duplicated across model rows in `raw`;
+            usable = [c for c in per_model if group[c].notna().any()]
+            if usable:
+                part = DetectorValidator().evaluate_frame(group, usable, {c: thresholds[c] for c in usable})
+                part["model"] = model_name
+                frames.append(part)
+    # Generator-independent scores repeat on every model's rows in `raw`;
     # de-duplicate by case before scoring them once.
-    if other:
+    if shared:
         dedup = raw.drop_duplicates(subset="case_id") if has_model_column else raw
-        shared = DetectorValidator().evaluate_frame(
-            dedup, other, {c: thresholds[c] for c in other},
-        )
-        shared["model"] = MODEL_INDEPENDENT
-        frames.append(shared)
-
+        part = DetectorValidator().evaluate_frame(dedup, shared, {c: thresholds[c] for c in shared})
+        part["model"] = MODEL_INDEPENDENT
+        frames.append(part)
     if not frames:
         return pd.DataFrame()
     summary = pd.concat(frames, ignore_index=True)
@@ -143,40 +195,187 @@ def summarise(raw: pd.DataFrame, runner) -> pd.DataFrame:
     return summary[leading + [c for c in summary.columns if c not in leading]]
 
 
+def print_reduction(reduction: pd.DataFrame, runner) -> None:
+    """Condition × detector: mean paired change vs. the baseline answer."""
+    from benchmark.reduction_runner import paired_deltas
+
+    cols = [c for c in runner.thresholds() if c in reduction.columns]
+    deltas = paired_deltas(reduction, cols)
+    if deltas.empty:
+        logger.warning("No reduction condition could be compared with its baseline; see run.log")
+        return
+    table = deltas.pivot_table(index="condition", columns="detector", values="delta",
+                               aggfunc="mean", sort=False).reset_index()
+    short = {c: c.replace("selfcheckgpt_", "sc_").replace("uqlm_", "uq_")
+             .replace("semantic_negentropy", "sne").replace("noncontradiction", "noncon")
+             .replace("entailment", "entail").replace("cosine_sim", "cos")
+             .replace("exact_match", "exact").replace("bert_score", "bert")
+             for c in table.columns}
+    print_table(table.rename(columns=short))
+    console.line("mean change in each detector's risk score vs. the model's baseline answer on the same")
+    console.line("question (negative = looks less hallucinated). Per model, per dataset: see the report.")
+
+
+def print_plan(plan: dict, config: dict) -> None:
+    runs = plan["runs"]
+    console.section("Run plan (config.yaml `run:` + command-line flags)")
+    console.kv("runs", f"{runs}  → " + (" · ".join(f"run_{i:02d}" for i in range(1, min(runs, 3) + 1))
+                                       + (" … " if runs > 3 else "") + " + combined/ (mean ± std)"))
+    console.kv("questions", " · ".join(f"{k} {v}" for k, v in plan["samples_per_dataset"].items())
+               + "  (per dataset)")
+    console.kv("detectors", ", ".join(plan["detectors"]) or "none")
+    if any(n in plan["detectors"] for n in SAMPLING_DETECTORS):
+        console.kv("samples", f"{plan['selfcheckgpt_samples']} per question per model "
+                   "(shared by every sampling-based detector)")
+    console.kv("reduction", (", ".join(plan["reduction_methods"]) + " vs. baseline"
+                             + f" · self_refine up to {plan['reduction_iterations']} rounds")
+               if plan["reduce"] else "off")
+    if any(n in plan["detectors"] for n in JUDGE_DETECTORS) or "prompt" in (
+            config["detectors"]["selfcheckgpt"].get("methods") or []) and "selfcheckgpt" in plan["detectors"]:
+        console.kv("judge", config.get("judge", {}).get("model"))
+    if any(n in plan["detectors"] for n in SAMPLING_DETECTORS):
+        console.kv("models", ", ".join(config.get("selected_models") or
+                                       [m["name"] for m in config.get("models", [])]))
+
+
+def run_once(run_dir: Path, run_label: str, config: dict, runner, datasets, generators,
+             reduce_on: bool, score_reduction_from: Path | None = None) -> dict:
+    """One complete repetition into `run_dir`; returns its stage timings."""
+    from benchmark.reduction_runner import ReductionRunner
+    from reporting import generate
+    from utils.run_manifest import write_run_files
+
+    started_at = datetime.now(timezone.utc)
+    stage_seconds: dict[str, float] = {}
+    run_dir.mkdir(parents=True, exist_ok=True)
+    runner.output_dir = run_dir
+    run_config = {**config, "benchmark": {**config["benchmark"], "output_dir": str(run_dir)}}
+
+    total_stages = 2 if (reduce_on or score_reduction_from) else 1
+    console.section(f"{run_label} · Stage 1/{total_stages} · Detector validation")
+    stage_start = time.monotonic()
+    raw = runner.validate(datasets, generators=generators or None)
+    stage_seconds["detector_validation"] = time.monotonic() - stage_start
+
+    summary = summarise(raw, runner)
+    if summary.empty:
+        raise SystemExit(f"All enabled detectors failed in {run_label}; see run.log")
+    summary.to_csv(run_dir / "detector_validation_summary.csv", index=False)
+    console.section(f"{run_label} · Detector validation results")
+    shown = summary.rename(columns={"average_precision": "auprc", "roc_auc": "auroc"})
+    shown["model"] = shown["model"].replace(MODEL_INDEPENDENT, "—")
+    print_table(shown[["detector", "model", "n_cases", "n_failed", "auroc", "auprc",
+                       "accuracy", "precision", "recall", "f1", "threshold"]])
+    console.line("auroc/auprc are threshold-free; the other columns use the threshold shown.")
+
+    if reduce_on:
+        console.section(f"{run_label} · Stage 2/2 · Reduction "
+                        f"(baseline vs. {', '.join(config['reduction'].get('methods', []))})")
+        stage_start = time.monotonic()
+        reduction = ReductionRunner(run_config, runner).run(datasets, generators)
+        stage_seconds["reduction"] = time.monotonic() - stage_start
+        console.section(f"{run_label} · Reduction results")
+        print_reduction(reduction, runner)
+    elif score_reduction_from:
+        source = score_reduction_from / run_dir.name / "reduction_comparison.csv"
+        console.section(f"{run_label} · Stage 2/2 · Scoring the reduction answers of {source.parent}")
+        stage_start = time.monotonic()
+        score_reduction_answers(source, run_dir / "reduction_scores.csv", runner, datasets)
+        stage_seconds["reduction_scoring"] = time.monotonic() - stage_start
+
+    if runner.generator_columns():
+        runner.bank.export(run_dir / "selfcheckgpt_samples.jsonl")
+    write_run_files(run_dir, run_config, sys.argv, datasets, generators, started_at, stage_seconds)
+    try:
+        generate(run_dir, title=f"{run_dir.parent.name}/{run_dir.name}")
+    except Exception as exc:
+        logger.opt(exception=exc).error(f"Report for {run_label} failed: {exc}")
+    return stage_seconds
+
+
+def score_reduction_answers(source: Path, output: Path, runner, datasets) -> None:
+    """Score another environment's reduction answers with this run's
+    (generator-independent) detectors, keyed by sample, model, condition."""
+    if not source.is_file():
+        raise SystemExit(f"{source} not found: run the sampling-detector environment first")
+    answers = pd.read_csv(source)
+    by_id = {s.sample_id: s for group in datasets.values() for s in group}
+    rows = []
+    usable = answers[answers["answer"].notna()] if "answer" in answers else answers.iloc[0:0]
+    bar = console.progress(list(usable.itertuples(index=False)), desc=f"{'reduction answers':<26}",
+                           total=len(usable), unit="answer")
+    for item in bar:
+        sample = by_id.get(item.sample_id)
+        key = {"sample_id": item.sample_id, "model": item.model, "condition": item.condition}
+        if sample is None:
+            rows.append({**key, "error": "sample not loaded in this environment"})
+            continue
+        case = {"case_id": f"{item.sample_id}:{item.condition}", "question": sample.question,
+                "context": sample.context, "answer": item.answer}
+        rows.append({**key, **runner.score_answer(case, None)})
+    bar.close()
+    pd.DataFrame(rows).to_csv(output, index=False)
+    console.line(f"✓ scored {len(rows)} reduction answers → {output.name}")
+
+
 def main() -> None:
     args = parse_args()
-    started_at = datetime.now(timezone.utc)
     started = time.monotonic()
-    stage_seconds: dict[str, float] = {}
 
     config = load_config(args.config)
-    apply_overrides(config, args)
+    plan = apply_plan(config, args)
     output_dir = Path(config["benchmark"].get("output_dir", "results/current"))
     log_file = None if args.dry_run else output_dir / "run.log"
     console.setup_logging(config.get("logging", {}).get("level", "INFO"), log_file)
     logger.debug("Command: {}", " ".join(sys.argv))
 
-    enabled = [
-        name for name in DETECTOR_NAMES
-        if config["detectors"].get(name, {}).get("enabled", False)
-    ]
-    selfcheck_on = "selfcheckgpt" in enabled
-    reduce_on = bool(config["reduction"].get("enabled", False))
+    enabled = plan["detectors"]
+    selfcheck_on = any(n in enabled for n in SAMPLING_DETECTORS)   # needs generators
+    judge_on = "uqlm_judge" in enabled or (
+        "selfcheckgpt" in enabled and "prompt" in (config["detectors"]["selfcheckgpt"].get("methods") or []))
+    score_from = Path(args.score_reduction_from) if args.score_reduction_from else None
+    reduce_on = plan["reduce"]
+    n_runs = plan["runs"]
 
-    console.header("LLM hallucination benchmark" + (" · dry run" if args.dry_run else ""))
+    mode = " · dry run" if args.dry_run else " · preflight only" if args.preflight else ""
+    console.header("LLM hallucination benchmark" + mode)
     console.kv("config", args.config)
     if not args.dry_run:
         console.kv("output", output_dir)
         console.kv("full log", log_file)
-    console.kv("stages", "detector validation" + (" → reduction (self_refine_adapted)" if reduce_on else ""))
+    print_plan(plan, config)
+
+    # ── Setup: fetch anything missing ───────────────────────────────────
+    from utils.resources import prepare
+
+    console.section("Setup" + (" (dry run: nothing is downloaded)" if args.dry_run
+                               else " (anything missing is downloaded and verified)"))
+    prepare(config, dry_run=args.dry_run)
+    if selfcheck_on or judge_on:
+        from models import ModelFactory
+        ModelFactory.ensure_ollama_models(
+            config, dry_run=args.dry_run, include_generators=selfcheck_on,
+            extra_tags=[config["judge"]["model"]] if judge_on else [])
 
     # ── Data ────────────────────────────────────────────────────────────
     from data.datasets import DatasetLoader
 
-    console.section("Data")
+    console.section("Data (the same subset is used in every run)")
     seed = int(config["benchmark"].get("seed", 42))
-    datasets = DatasetLoader(config, seed=seed).load_all()
-    wanted = [d["name"] for d in config.get("datasets", []) if d.get("enabled", True)]
+    data_config = config
+    pending_download = []
+    if args.dry_run:
+        # Files the Setup step said it would download are not loaded here.
+        data_config = {**config, "datasets": []}
+        for d in config.get("datasets", []):
+            if d.get("source") == "json" and d.get("path") and not Path(d["path"]).is_file():
+                pending_download.append(d["name"])
+            else:
+                data_config["datasets"].append(d)
+    datasets = DatasetLoader(data_config, seed=seed).load_all()
+    for name in pending_download:
+        console.kv(name, "downloaded on the real run", width=24)
+    wanted = [d["name"] for d in data_config.get("datasets", []) if d.get("enabled", True)]
     missing = [name for name in wanted if name not in datasets]
     if missing:
         raise SystemExit(
@@ -184,41 +383,40 @@ def main() -> None:
             "Fix them or set `enabled: false` in the config; a run on partial "
             "data would be mislabeled."
         )
-    n_samples = n_cases = 0
+    n_samples = n_cases = n_hallucinated = 0
     for name, samples in datasets.items():
         cases = DatasetLoader.detection_cases(samples)
+        bad = sum(c["label"] for c in cases)
         n_samples += len(samples)
         n_cases += len(cases)
-        console.kv(name, f"{len(samples):>4} samples → {len(cases):>4} labeled cases", width=24)
-    console.kv("total", f"{n_samples:>4} samples → {n_cases:>4} labeled cases "
-               f"(half factual, half hallucinated) · seed {seed}", width=24)
-    if not n_cases:
+        n_hallucinated += bad
+        console.kv(name, f"{len(samples):>4} questions → {len(cases):>4} labeled answers "
+                   f"({len(cases) - bad} faithful / {bad} hallucinated)", width=24)
+    console.kv("total", f"{n_samples:>4} questions → {n_cases:>4} labeled answers "
+               f"({n_cases - n_hallucinated} faithful / {n_hallucinated} hallucinated) · seed {seed}", width=24)
+    if not n_cases and not pending_download:
         raise SystemExit("No labeled detector-validation cases were loaded")
 
     # ── Detectors ───────────────────────────────────────────────────────
     console.section("Detectors")
     if not enabled:
-        console.line("none enabled (use --detectors ...)")
+        console.line("none selected (run.detectors or --detectors)")
     for name in enabled:
-        console.kv(name, describe_detector(name, config["detectors"][name]))
+        console.kv(name, describe_detector(name, config["detectors"][name], config.get("judge", {})))
 
     if args.dry_run:
         console.section("Dry run complete")
-        console.line("No model, detector package, or checkpoint was loaded.")
+        console.line("Nothing was downloaded or loaded. A real run fetches every ↓ item above first.")
         return
     if not enabled:
-        raise SystemExit("No official detector is enabled")
-
-    if any(name in enabled for name in ("minicheck", "summac", "alignscore")):
-        from detectors.nltk_resources import ensure_sentence_tokenizer
-        ensure_sentence_tokenizer()
+        raise SystemExit("No detector selected (run.detectors or --detectors)")
 
     # ── Generators ──────────────────────────────────────────────────────
     generators = []
     if selfcheck_on:
         from models import ModelFactory
 
-        console.section("Generators (SelfCheckGPT sampling" + (" + reduction)" if reduce_on else ")"))
+        console.section("Generators (samples for SelfCheckGPT/UQLM" + (" + reduction)" if reduce_on else ")"))
         generators = ModelFactory.build_all(config)
         if not generators:
             raise SystemExit(
@@ -232,112 +430,84 @@ def main() -> None:
                 extras.append(f"think={g.config['think']}")
             console.kv(g.name, f"{g.config.get('model')}" + (f"  ({', '.join(extras)})" if extras else ""),
                        width=18)
-        requested = len(config.get("selected_models") or config.get("models", []))
-        if len(generators) < requested:
-            console.line(f"⚠ {len(generators)} of {requested} selected models are available")
-
-        n_per_prompt = int(config["detectors"]["selfcheckgpt"].get("n_samples", 5))
-        console.section("Workload")
-        console.kv("validation", f"{n_samples} prompts × {n_per_prompt} samples × "
-                   f"{len(generators)} models = {n_samples * n_per_prompt * len(generators):,} generations")
-        if reduce_on:
-            iters = int(config["reduction"].get("max_iterations", 3))
-            upper = n_samples * len(generators) * (1 + 2 * iters)
-            console.kv("reduction", f"{n_samples} samples × {len(generators)} models × "
-                       f"2–{1 + 2 * iters} calls = up to {upper:,} generations "
-                       "(scoring reuses the validation samples)")
-        console.line("Each progress bar shows elapsed<remaining time for that model.")
-
-    # ── Stage 1: detector validation ────────────────────────────────────
-    from benchmark import BenchmarkRunner
-
-    total_stages = 2 if reduce_on else 1
-    console.section(f"Stage 1/{total_stages} · Detector validation")
-    stage_start = time.monotonic()
-    runner = BenchmarkRunner(config, generator=generators[0] if generators else None)
-    raw = runner.validate(datasets, generators=generators or None)
-    stage_seconds["detector_validation"] = time.monotonic() - stage_start
-
-    summary = summarise(raw, runner)
-    if summary.empty:
-        raise SystemExit(f"All enabled detectors failed; see {log_file} and detector_validation_raw.csv")
-    summary_path = output_dir / "detector_validation_summary.csv"
-    summary.to_csv(summary_path, index=False)
-
-    console.section("Detector validation results")
-    shown = summary.rename(columns={"average_precision": "auprc", "roc_auc": "auroc"})
-    shown["model"] = shown["model"].replace(MODEL_INDEPENDENT, "—")
-    print_table(shown[["detector", "model", "n_cases", "n_failed", "auroc", "auprc",
-                       "accuracy", "precision", "recall", "f1", "threshold"]])
-    console.line("auroc/auprc are threshold-free; the other columns use the threshold shown.")
-
-    # ── Stage 2: reduction ──────────────────────────────────────────────
-    selfcheck = runner.detectors.get("selfcheckgpt")
-    if reduce_on:
-        detector_name = config["reduction"].get("detector", "selfcheckgpt")
-        if detector_name != "selfcheckgpt":
-            raise SystemExit("Reduction stage currently supports only detector: 'selfcheckgpt'")
-        if selfcheck is None:
+        requested = [c["name"] for c in ModelFactory.active_configs(config)]
+        missing_models = [n for n in requested if n not in {g.name for g in generators}]
+        if missing_models:
             raise SystemExit(
-                f"Reduction stage needs detector '{detector_name}' enabled in `detectors:`"
+                f"\nSelected model(s) not available: {', '.join(missing_models)} "
+                "(reason above). Pull them, or remove them from selected_models."
             )
 
-        from benchmark.reduction_runner import ReductionRunner
+        n_per_prompt = int(config["detectors"]["selfcheckgpt"]["n_samples"])
+        per_run = n_samples * n_per_prompt * len(generators)
+        console.section("Workload")
+        console.kv("validation", f"{n_samples} questions × {n_per_prompt} samples × "
+                   f"{len(generators)} models = {per_run:,} generations per run")
+        if reduce_on:
+            iters = int(config["reduction"]["max_iterations"])
+            methods = config["reduction"].get("methods", [])
+            per_q = 1 + ("closed_book" in methods) + ("greedy" in methods) \
+                + (2 * iters if "self_refine_adapted" in methods else 0) + (7 if "cove_adapted" in methods else 0)
+            console.kv("reduction", f"{n_samples} questions × {len(generators)} models × up to {per_q} calls "
+                       f"= up to {n_samples * len(generators) * per_q:,} generations per run "
+                       f"({len(methods) + 1} answers per question, each scored by every detector)")
+        console.kv("runs", f"× {n_runs}")
 
-        console.section(f"Stage 2/2 · Reduction (self_refine_adapted, "
-                        f"max_iterations={config['reduction'].get('max_iterations', 3)})")
-        stage_start = time.monotonic()
-        reduction = ReductionRunner(config, selfcheck).run(datasets, generators)
-        stage_seconds["reduction"] = time.monotonic() - stage_start
+    # ── Preflight: every piece once, on one real case ───────────────────
+    from benchmark import BenchmarkRunner
+    from benchmark.preflight import run_preflight
 
-        ok = reduction[reduction["error"].isna()] if "error" in reduction else reduction.iloc[0:0]
-        console.section("Reduction results (SelfCheckGPT score, lower = less hallucinated)")
-        if ok.empty:
-            logger.warning("No reduction row succeeded; see run.log")
-        else:
-            table = ok.groupby("model", sort=False).agg(
-                n_ok=("score_delta", "count"),
-                baseline=("baseline_score", "mean"),
-                refined=("refined_score", "mean"),
-                mean_delta=("score_delta", "mean"),
-                win_rate=("score_delta", lambda s: (s < 0).mean()),
-            ).reset_index()
-            table.insert(2, "n_failed", [
-                int((reduction["model"] == m).sum()) - int(n) for m, n in zip(table["model"], table["n_ok"])
-            ])
-            print_table(table)
-            console.line("win_rate = share of samples whose refined answer scored lower than the baseline.")
+    console.section("Preflight (one real case through every detector, model and stage)")
+    runner = BenchmarkRunner(config, generator=generators[0] if generators else None)
+    estimate = run_preflight(config, runner, datasets, generators, reduce_on)
+    per_run_seconds = sum(estimate.values())
+    if per_run_seconds:
+        parts = [f"{stage.replace('_', ' ')} ~{console.duration(sec)}"
+                 for stage, sec in estimate.items() if sec]
+        console.line(f"Estimated time per run: {' · '.join(parts)}")
+        console.line(f"Estimated total: {n_runs} run(s) × ~{console.duration(per_run_seconds)} "
+                     f"= ~{console.duration(per_run_seconds * n_runs)}")
+    if args.preflight:
+        console.section("Preflight passed")
+        console.line("Everything needed is downloaded and working. Run again without "
+                     "--preflight to start.")
+        return
+    console.line("All checks passed · starting. Each progress bar shows that model's "
+                 "elapsed<remaining time.")
 
-    # ── Archive + report ────────────────────────────────────────────────
-    # Same outputs for a 2-sample smoke run and a full run: only the data
-    # size differs.
-    if selfcheck is not None:
-        selfcheck.export_samples(output_dir / "selfcheckgpt_samples.jsonl")
-    from utils.run_manifest import write_run_files
-    write_run_files(output_dir, config, sys.argv, datasets, generators, started_at, stage_seconds)
+    # ── Runs ────────────────────────────────────────────────────────────
+    for index in range(1, n_runs + 1):
+        run_label = f"Run {index}/{n_runs}"
+        console.header(f"{run_label} → {output_dir / f'run_{index:02d}'}")
+        if index > 1:
+            runner.bank.reset()  # every run draws its own samples
+        run_once(output_dir / f"run_{index:02d}", run_label, config, runner,
+                 datasets, generators, reduce_on, score_from)
 
-    from scripts.generate_report import generate
+    # ── Combined ────────────────────────────────────────────────────────
+    from reporting import generate
+
+    console.header(f"Combined · {n_runs} run(s) → {output_dir / 'combined'}")
+    produced = {}
     try:
-        produced = generate(output_dir)
+        produced = generate(output_dir, out_dir=output_dir / "combined")
     except Exception as exc:
-        logger.opt(exception=exc).error(f"Report generation failed: {exc}")
-        produced = {}
+        logger.opt(exception=exc).error(f"Combined report failed: {exc}")
+    takeaways = output_dir / "combined" / "takeaways.md"
+    if takeaways.is_file():
+        for line in takeaways.read_text(encoding="utf-8").splitlines():
+            if line.startswith("- "):
+                console.line("• " + line[2:])
 
     console.section(f"Done in {console.duration(time.monotonic() - started)}")
-    console.line(f"All files are in {output_dir}/")
-    console.kv("report", produced.get("report", "not written (see run.log)"))
-    console.kv("charts", produced.get("charts", "—"))
-    console.kv("summary", summary_path)
-    console.kv("raw scores", output_dir / "detector_validation_raw.csv")
-    if reduce_on:
-        console.kv("reduction", output_dir / "reduction_comparison.csv")
-    for label in ("per-dataset", "reduction summary"):
-        if label in produced:
-            console.kv(label, produced[label])
-    if selfcheck is not None:
-        console.kv("samples", output_dir / "selfcheckgpt_samples.jsonl")
-    console.kv("manifest", output_dir / "run_manifest.json")
-    console.kv("full log", log_file)
+    console.line(f"{output_dir}/")
+    for index in range(1, n_runs + 1):
+        console.line(f"  run_{index:02d}/     REPORT.md · report.html · report.docx · charts/ · tables/ · raw CSVs")
+    console.line("  combined/   REPORT.md · report.html · report.docx · takeaways.md · charts/ · tables/"
+                 "   ← start here")
+    console.line("  run.log     full log with tracebacks")
+    if "report (docx)" in produced:
+        console.kv("open", produced["report (docx)"])
 
 
 if __name__ == "__main__":
