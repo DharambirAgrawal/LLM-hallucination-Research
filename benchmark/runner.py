@@ -242,6 +242,9 @@ class BenchmarkRunner:
                 model_rows = [{**row, "model": model_name} for row in base_rows]
                 self._score_all(model_rows, gen_families, f"[{index}/{total}] {model_name}", generator)
                 rows.extend(model_rows)
+                # free Ollama's memory for the next model and the detectors
+                if hasattr(generator, "release"):
+                    generator.release()
 
         frame = pd.DataFrame(rows)
         output = self.output_dir / "detector_validation_raw.csv"

@@ -217,6 +217,9 @@ class ReductionRunner:
                 else:
                     consecutive = 0
             bar.close()
+            # free Ollama's memory for the next model and the detectors
+            if hasattr(model, "release"):
+                model.release()
             elapsed = console.duration(time.monotonic() - started)
             if failures == 0:
                 console.line(f"✓ {model.name} · {len(samples)} questions × {len(self.conditions())} conditions in {elapsed}")

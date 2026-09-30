@@ -123,7 +123,7 @@ class OllamaModel(BaseModel):
                         f"Model '{self.model_tag}' not found in Ollama "
                         f"(run: ollama pull {self.model_tag})"
                     ) from exc
-                wait = 2 ** attempt
+                wait = 5 * 2 ** attempt
                 logger.debug(
                     f"[{self.name}] attempt {attempt + 1}/3 failed: "
                     f"{last_error}; retrying in {wait}s"
@@ -140,7 +140,33 @@ class OllamaModel(BaseModel):
             )
             logger.debug(f"[{self.name}] attempt {attempt + 1}/3: {last_error}")
 
-        raise RuntimeError(f"{self.name}: {last_error}")
+        raise RuntimeError(self._explain(last_error))
+
+    def _explain(self, error: str) -> str:
+        """Turn Ollama's raw error into what happened and what to do."""
+        low = error.lower()
+        where = f"{self.name} ({self.model_tag}) failed 3 times"
+        if "timed out" in low or "timeout" in low:
+            return (f"{where}: no answer within {self.timeout}s. Large models can need minutes to load "
+                    f"the first time; raise `ollama.timeout` in config.yaml. Last error: {error}")
+        if "memory" in low or "cuda" in low or "out of" in low:
+            return (f"{where}: Ollama could not load the model ({error}). Free GPU memory: "
+                    "set `device: cpu` for the detectors in config.yaml, or use a smaller model.")
+        if "think" in low:
+            return (f"{where}: this Ollama version does not accept `think` ({error}). Update Ollama "
+                    "(0.9 or newer), or remove `think` from this model in config.yaml.")
+        if "connect" in low or "refused" in low:
+            return f"{where}: cannot reach Ollama at {self.host} ({error}). Is `ollama serve` running?"
+        return f"{where}: {error}"
+
+    def release(self) -> None:
+        """Unload the model from Ollama's memory (GPU/RAM) now instead of
+        after Ollama's idle timeout, so the next model and the detectors have
+        room. Harmless if it fails; the model then unloads on its own."""
+        try:
+            self._client.generate(model=self.model_tag, prompt="", keep_alive=0)
+        except Exception as exc:
+            logger.debug(f"[{self.name}] could not unload: {exc}")
 
     # ── convenience ───────────────────────────────────────────
 

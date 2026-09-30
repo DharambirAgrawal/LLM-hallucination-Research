@@ -26,7 +26,7 @@ run:
 
 ollama:
   host: "http://localhost:11434"
-  timeout: 120
+  timeout: 600       # seconds per request; the first call loads the model (large ones take minutes)
   # Pull any selected model that is not on the Ollama server yet, with a
   # progress bar, before the run starts. Set false (here or per model) to
   # skip missing models instead.

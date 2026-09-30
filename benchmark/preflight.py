@@ -37,8 +37,8 @@ class Preflight:
         except Exception as exc:
             reason = str(exc).strip() or type(exc).__name__
             logger.opt(exception=exc).debug(f"Preflight failed: {label}: {reason}")
-            console.line(f"✗ {label:<34} {type(exc).__name__}: {reason[:200]}")
-            self.failures.append(f"{label}: {reason[:200]}")
+            console.line(f"✗ {label:<34} {type(exc).__name__}: {reason[:400]}")
+            self.failures.append(f"{label}: {reason[:400]}")
             return None
         seconds = time.monotonic() - started
         console.line(f"✓ {label:<34} {detail} ({console.duration(seconds)})")
@@ -168,6 +168,9 @@ def run_preflight(
 
             reduced = pf.check(f"{g.name} reduction round", reduction_round)
             estimate["reduction"] += (reduced or 0) * n_questions
+        # free Ollama's memory for the next model and the detectors
+        if hasattr(g, "release"):
+            g.release()
 
     if pf.failures:
         console.section("Preflight failed · nothing long was started")
