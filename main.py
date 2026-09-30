@@ -37,10 +37,16 @@ def parse_args() -> argparse.Namespace:
         choices=DETECTOR_NAMES,
         help="Detectors to run (run.detectors)",
     )
-    parser.add_argument(
+    smoke_group = parser.add_mutually_exclusive_group()
+    smoke_group.add_argument(
         "--smoke", action="store_true",
         help="Quick end-to-end test: 2 runs, 2 questions per dataset, 2 samples, 1 refine round "
              "(any of these given explicitly still wins)",
+    )
+    smoke_group.add_argument(
+        "--smoke-2q", action="store_true",
+        help="Two questions total from the first enabled dataset; 2 runs, every detector, "
+             "every configured reduction method, and every selected generator model",
     )
     parser.add_argument(
         "--part", help=argparse.SUPPRESS,   # used by scripts/run_full.py: write run_XX/<part>/
@@ -94,6 +100,7 @@ def parse_args() -> argparse.Namespace:
         help="Download everything, run every check on one real case, print "
              "the time estimate, then stop (no long stage is started)",
     )
+    parser.add_argument("--skip-preflight", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
@@ -141,8 +148,8 @@ SMOKE = {"runs": 2, "max_samples": 2, "n_samples": 2, "max_iterations": 1}
 
 
 def apply_smoke(args: argparse.Namespace) -> None:
-    """--smoke fills in the tiny test numbers that were not given explicitly."""
-    if getattr(args, "smoke", False):
+    """Smoke modes fill in test numbers that were not given explicitly."""
+    if getattr(args, "smoke", False) or getattr(args, "smoke_2q", False):
         for key, value in SMOKE.items():
             if getattr(args, key, None) is None:
                 setattr(args, key, value)
@@ -406,6 +413,13 @@ def main() -> None:
     started = time.monotonic()
 
     config = load_config(args.config)
+    if args.smoke_2q:
+        if args.max_samples is not None or (args.detectors and not args.part) or args.no_reduce:
+            raise SystemExit("--smoke-2q fixes the two-question, all-detector, all-reducer plan; "
+                             "omit --max-samples, --detectors, and --no-reduce")
+        from utils.smoke import configure_two_question_smoke
+        chosen = configure_two_question_smoke(config, DETECTOR_NAMES)
+        console.line(f"Two-question smoke dataset: {chosen}")
     apply_smoke(args)
     plan = apply_plan(config, args)
     output_dir = Path(config["benchmark"].get("output_dir", "results/current"))
@@ -487,6 +501,9 @@ def main() -> None:
                    f"({len(cases) - bad} faithful / {bad} hallucinated)", width=24)
     console.kv("total", f"{n_samples:>4} questions → {n_cases:>4} labeled answers "
                f"({n_cases - n_hallucinated} faithful / {n_hallucinated} hallucinated) · seed {seed}", width=24)
+    if args.smoke_2q and not args.dry_run and n_samples != 2:
+        raise SystemExit(f"--smoke-2q needs exactly two usable questions in {chosen}; "
+                         f"loaded {n_samples}")
     if not n_cases and not pending_download:
         raise SystemExit("No labeled detector-validation cases were loaded")
 
@@ -552,17 +569,18 @@ def main() -> None:
     from benchmark import BenchmarkRunner
     from benchmark.preflight import run_preflight
 
-    console.section("Preflight (one real case through every detector, model and stage)")
     runner = BenchmarkRunner(config, generator=generators[0] if generators else None)
     runner.attach(generators)   # a model that does not fit can take the detectors' GPU memory
-    estimate = run_preflight(config, runner, datasets, generators, reduce_on)
-    per_run_seconds = sum(estimate.values())
-    if per_run_seconds:
-        parts = [f"{stage.replace('_', ' ')} ~{console.duration(sec)}"
-                 for stage, sec in estimate.items() if sec]
-        console.line(f"Estimated time per run: {' · '.join(parts)}")
-        console.line(f"Estimated total: {n_runs} run(s) × ~{console.duration(per_run_seconds)} "
-                     f"= ~{console.duration(per_run_seconds * n_runs)}")
+    if not args.skip_preflight:
+        console.section("Preflight (one real case through every detector, model and stage)")
+        estimate = run_preflight(config, runner, datasets, generators, reduce_on)
+        per_run_seconds = sum(estimate.values())
+        if per_run_seconds:
+            parts = [f"{stage.replace('_', ' ')} ~{console.duration(sec)}"
+                     for stage, sec in estimate.items() if sec]
+            console.line(f"Estimated time per run: {' · '.join(parts)}")
+            console.line(f"Estimated total: {n_runs} run(s) × ~{console.duration(per_run_seconds)} "
+                         f"= ~{console.duration(per_run_seconds * n_runs)}")
     if args.preflight:
         console.section("Preflight passed")
         console.line("Everything needed is downloaded and working. Run again without "

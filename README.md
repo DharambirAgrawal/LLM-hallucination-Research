@@ -201,7 +201,8 @@ in [`docs/HOW_TO_RUN.md`](docs/HOW_TO_RUN.md). In short:
 
 ```bash
 pip install -r requirements.txt       # the one install; Ollama itself is a system install
-python scripts/run_full.py --smoke    # smoke test: the whole experiment with tiny numbers
+python scripts/run_full.py --smoke-2q # 2 questions total, 2 runs, all detectors and reducers
+python scripts/run_full.py --smoke    # 2 questions per dataset, 2 runs
 python scripts/run_full.py --runs 5   # the full experiment: 5 independent runs
 ```
 

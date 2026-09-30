@@ -152,15 +152,44 @@ run's `config_used.yaml` and in the report.
 
 ## 3. Smoke test first — always
 
-The whole experiment with tiny numbers (2 runs, 2 questions per dataset, 2
-samples, 1 Self-Refine round), every detector group, every reduction
-method. It produces exactly the same folders and files as the full run:
+The whole experiment with smaller numbers (2 runs, 2 questions **per
+dataset**, 2 samples, 1 Self-Refine round), every detector group, every
+reduction method. The default config has 10 enabled datasets and 5 generator
+models: that is up to 2,800 generator calls across both runs, plus judge
+calls, detector scoring, and preflight. The command prints this workload
+before setup starts. It produces exactly the same folders and files as the
+full run:
 
 ```bash
 python scripts/run_full.py --smoke
 ```
 
-Results go to `results/smoke-<date-time>/` (or pass `--output
+For the same end-to-end coverage with **two questions total**, use:
+
+```bash
+python scripts/run_full.py --smoke-2q
+```
+
+This selects two seeded questions from the first enabled dataset (currently
+HaluEval QA), runs twice, and includes all six detectors, all five configured
+reduction methods, and all five selected generator models. It prepares only
+that dataset, but first use can still install detector packages and download
+their weights; AlignScore's checkpoint is about 1.9 GB. The generator budget
+is up to 280 calls across both runs, plus judge calls and preflight. Missing
+Ollama model tags are still pulled when `ollama.auto_pull` is true.
+
+For a shorter check of the sampling detectors, use one run and skip the
+reduction stage:
+
+```bash
+python scripts/run_full.py --smoke --runs 1 --max-samples 1 --n-samples 1 \
+  --detectors selfcheckgpt uqlm --no-reduce
+```
+
+This still uses every selected generator model and every enabled dataset.
+
+Results go to `results/smoke-<date-time>/` or `results/smoke-2q-<date-time>/`
+(or pass `--output
 results/<name>`; a folder that already holds runs is refused, so old and new
 runs can never mix).
 
@@ -400,6 +429,7 @@ instead of the newest.
 | Flag | `main.py` | `run_full.py` | What it does |
 |---|---|---|---|
 | `--smoke` | ✓ | ✓ | Quick test: 2 runs, 2 questions per dataset, 2 samples, 1 refine round |
+| `--smoke-2q` | ✓ | ✓ | 2 questions total, 2 runs, every detector and configured reducer |
 | `--runs N` | ✓ | ✓ | Independent runs (`run.runs`) |
 | `--max-samples N` | ✓ | ✓ | Questions per dataset (`run.samples_per_dataset`) |
 | `--n-samples N` | ✓ | ✓ | Samples per question per model (`run.selfcheckgpt_samples`) |

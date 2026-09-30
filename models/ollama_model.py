@@ -132,6 +132,8 @@ class OllamaModel(BaseModel):
                     ) from exc
                 if any(k in last_error.lower() for k in self._NO_ROOM):
                     self._make_room()
+                if attempt == 2:
+                    break
                 wait = 5 * 2 ** attempt
                 logger.debug(
                     f"[{self.name}] attempt {attempt + 1}/3 failed: "

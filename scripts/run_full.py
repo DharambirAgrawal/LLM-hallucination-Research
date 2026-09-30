@@ -65,10 +65,13 @@ def parse_args() -> argparse.Namespace:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--runs", type=int, help="Independent runs (default: run.runs in config.yaml)")
-    parser.add_argument("--smoke", action="store_true",
+    smoke_group = parser.add_mutually_exclusive_group()
+    smoke_group.add_argument("--smoke", action="store_true",
                         help="Quick end-to-end test: 2 runs, 2 questions per dataset, 2 samples, "
                              "1 refine round (explicit flags still win)")
-    parser.add_argument("--output", help="Result folder (default: results/<run|smoke>-<timestamp>)")
+    smoke_group.add_argument("--smoke-2q", action="store_true",
+                             help="Two questions total; 2 runs, all detectors and reducers")
+    parser.add_argument("--output", help="Result folder (default: results/<run|smoke|smoke-2q>-<timestamp>)")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--detectors", nargs="+", choices=ALL_DETECTORS,
                         help="Detectors to run (default: run.detectors in config.yaml)")
@@ -146,14 +149,47 @@ def ensure_python(name: str, requirements: str, log_dir: Path) -> Path:
     return python
 
 
+def workload(config: dict, args: argparse.Namespace, runs: int, reduce_on: bool) -> tuple[int, int]:
+    """Requested question slots and an upper bound on generator calls.
+
+    This is shown before installing environments or downloading resources.
+    Actual datasets can contain fewer questions; judge calls are additional.
+    """
+    default_questions = config.get("run", {}).get("samples_per_dataset", 50)
+    questions = sum(
+        args.max_samples if args.max_samples is not None else
+        (2 if args.smoke else ds.get("max_samples", default_questions))
+        for ds in config.get("datasets", []) if ds.get("enabled", True)
+    )
+    if not any(d in (args.detectors or config.get("run", {}).get("detectors") or ALL_DETECTORS)
+               for d in ("selfcheckgpt", "uqlm")):
+        return questions, 0
+    models = len(config.get("selected_models") or config.get("models", []))
+    samples = args.n_samples if args.n_samples is not None else (
+        2 if args.smoke or args.smoke_2q else config.get("run", {}).get("selfcheckgpt_samples", 5))
+    methods = config.get("reduction", {}).get("methods", []) if reduce_on else []
+    iterations = args.max_iterations if args.max_iterations is not None else (
+        1 if args.smoke or args.smoke_2q else config.get("run", {}).get("reduction_iterations", 3))
+    reduction_calls = (1 + ("closed_book" in methods) + ("greedy" in methods)
+                       + (2 * iterations if "self_refine_adapted" in methods else 0)
+                       + (7 if "cove_adapted" in methods else 0)) if reduce_on else 0
+    return questions, runs * questions * models * (samples + reduction_calls)
+
+
 def main() -> None:
     args = parse_args()
     started = time.monotonic()
 
     import yaml
     config = yaml.safe_load((ROOT / args.config).read_text()) or {}
+    if args.smoke_2q:
+        if args.max_samples is not None or args.detectors or args.no_reduce:
+            raise SystemExit("--smoke-2q fixes the two-question, all-detector, all-reducer plan; "
+                             "omit --max-samples, --detectors, and --no-reduce")
+        from utils.smoke import configure_two_question_smoke
+        chosen = configure_two_question_smoke(config, ALL_DETECTORS)
     plan = config.get("run", {})
-    if args.smoke:
+    if args.smoke or args.smoke_2q:
         args.runs = args.runs if args.runs is not None else 2
     runs = args.runs if args.runs is not None else plan.get("runs", 1)
     selected = args.detectors or plan.get("detectors") or list(ALL_DETECTORS)
@@ -163,7 +199,8 @@ def main() -> None:
         any(d in groups.get("core", []) for d in ("selfcheckgpt", "uqlm"))
 
     # Absolute: main.py runs with cwd=ROOT.
-    stamp = f"{'smoke' if args.smoke else 'run'}-{datetime.now():%Y%m%d-%H%M%S}"
+    prefix = "smoke-2q" if args.smoke_2q else "smoke" if args.smoke else "run"
+    stamp = f"{prefix}-{datetime.now():%Y%m%d-%H%M%S}"
     output_dir = Path(args.output).resolve() if args.output else ROOT / "results" / stamp
     old = sorted(output_dir.glob("run_[0-9]*")) if output_dir.is_dir() else []
     if old:
@@ -172,18 +209,30 @@ def main() -> None:
     log_dir = output_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    console.header("Full experiment" + (" · smoke test" if args.smoke else ""))
+    console.header("Full experiment" + (" · two-question smoke test" if args.smoke_2q
+                                        else " · smoke test" if args.smoke else ""))
     console.kv("runs", f"{runs} independent runs on the same data → run_01 … run_{runs:02d} + combined/")
     console.kv("detectors", ", ".join(d for dets in groups.values() for d in dets))
     console.kv("reduction", ", ".join(config.get("reduction", {}).get("methods", [])) + " vs. baseline"
                if reduce_on else "off")
-    console.kv("config", f"{args.config}" + (" + smoke numbers" if args.smoke else ""))
+    console.kv("config", f"{args.config}" + (" + two-question smoke plan" if args.smoke_2q
+                                                 else " + smoke numbers" if args.smoke else ""))
+    if args.smoke_2q:
+        console.kv("dataset", chosen)
     console.kv("output", output_dir)
+    questions, generator_calls = workload(config, args, runs, reduce_on)
+    console.kv("question slots", f"{questions} per run across "
+               f"{sum(ds.get('enabled', True) for ds in config.get('datasets', []))} datasets")
+    if generator_calls:
+        console.kv("generator calls", f"up to {generator_calls:,} across all runs "
+                   "(judge calls and preflight additional)")
 
     def main_args(name: str) -> list[str]:
         cmd = ["--config", args.config, "--detectors", *groups[name],
                "--output", str(output_dir), "--part", name, "--runs", str(runs)]
-        if args.smoke:
+        if args.smoke_2q:
+            cmd.append("--smoke-2q")
+        elif args.smoke:
             cmd.append("--smoke")
         for flag, value in (("--max-samples", args.max_samples), ("--n-samples", args.n_samples),
                             ("--max-iterations", args.max_iterations), ("--device", args.device)):
@@ -232,7 +281,9 @@ def main() -> None:
     for index, name in enumerate(groups, 1):
         print(f"\n\n{'#' * console.WIDTH}\n#  [{index}/{total}] {name}: all {runs} runs\n{'#' * console.WIDTH}",
               file=sys.stderr, flush=True)
-        cmd = main_args(name)
+        # Phase 1 already ran this group's full preflight in a subprocess.
+        # Repeating it here reloads every model and reruns every method.
+        cmd = [*main_args(name), "--skip-preflight"]
         if name != "core" and reduce_on and core_ok:
             cmd += ["--score-reduction-from", str(output_dir)]
         group_started = time.monotonic()
@@ -280,6 +331,8 @@ def main() -> None:
     console.line("  logs/       one log per detector group")
     if "report (docx)" in produced:
         console.kv("open", produced["report (docx)"])
+    if any(status != "ok" for _, status, _ in results):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
