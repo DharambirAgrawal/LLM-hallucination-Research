@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Validate official hallucination detectors on fixed labeled responses."""
+"""Run the benchmark in one Python environment.
+
+Setup (download + verify everything) → preflight (one real question through
+every detector, model and reduction method) → run_01 … run_N (Stage A:
+detector validation on labeled answers; Stage B: reduction methods vs. the
+baseline answer) → per-run and combined reports. scripts/run_full.py runs
+this once per detector environment. Flow and diagrams: docs/ARCHITECTURE.md.
+"""
 from __future__ import annotations
 
 import argparse

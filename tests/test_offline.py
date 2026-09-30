@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import struct
 import sys
 import tempfile
 import types
@@ -347,13 +346,12 @@ class DocumentationTests(unittest.TestCase):
                     missing.append(f"{document.relative_to(ROOT)} -> {target}")
         self.assertEqual(missing, [])
 
-    def test_diagrams_are_valid_wide_pngs(self):
-        for name in ("research-pipeline.png", "official-detectors.png"):
-            data = (ROOT / "assets" / "diagrams" / name).read_bytes()
-            self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n")
-            width, height = struct.unpack(">II", data[16:24])
-            self.assertGreater(width, height)
-            self.assertGreaterEqual(width, 1600)
+    def test_readme_and_architecture_have_diagrams(self):
+        for doc in ("README.md", "docs/ARCHITECTURE.md"):
+            blocks = re.findall(r"```mermaid\n(.*?)```", (ROOT / doc).read_text(), re.S)
+            self.assertGreaterEqual(len(blocks), 2, doc)
+            for block in blocks:
+                self.assertRegex(block.lstrip(), r"^(flowchart|sequenceDiagram)\b", doc)
 
     def test_provenance_has_full_revisions_and_existing_adapters(self):
         registry = yaml.safe_load((ROOT / "provenance" / "sources.yaml").read_text())

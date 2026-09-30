@@ -197,9 +197,5 @@ class SelfCheckGPTDetector:
             errors=errors,
         )
 
-    # Kept for callers of the previous API.
-    def reset_samples(self) -> None:
-        self.bank.reset()
-
     def export_samples(self, path: Path) -> int:
         return self.bank.export(path)

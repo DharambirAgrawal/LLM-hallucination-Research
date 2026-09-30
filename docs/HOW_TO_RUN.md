@@ -1,5 +1,7 @@
 # How to run
 
+How the pieces fit together, with diagrams: [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
 ## 0. First-time setup on a new Linux machine
 
 You install two things by hand: the Python packages and Ollama itself.
@@ -243,7 +245,7 @@ has:
 | `report.html` | the same report as one self-contained web page (charts embedded) |
 | `REPORT.md` | the same report in Markdown (charts in `charts/`) |
 | `takeaways.md` | just the key findings, in plain sentences |
-| `charts/*.png` | detector validation (AUROC/AUPRC/F1), AUROC per dataset, run-to-run consistency, reduction scores by model and by dataset, better/worse share, latency |
+| `charts/*.png` | AUROC and AUPRC per detector × model, AUROC per detector × dataset, AUROC in every run (consistency), change vs. baseline per method × detector and per method × model, share of questions improved, seconds per answer |
 | `tables/*.csv` | every table in the report |
 
 The report sections: **Run plan** (runs, datasets and sizes, models with

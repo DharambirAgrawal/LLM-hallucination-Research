@@ -1,24 +1,85 @@
 # Reproducible LLM Hallucination Research Harness
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://www.python.org/)
-[![Methods](https://img.shields.io/badge/methods-pinned%20upstream-0B6E75.svg)](provenance/sources.yaml)
+[![Methods](https://img.shields.io/badge/methods-official%20code%2C%20pinned-0B6E75.svg)](provenance/sources.yaml)
 [![Models](https://img.shields.io/badge/LLM-local%20Ollama-F28C28.svg)](config.yaml)
-[![Status](https://img.shields.io/badge/status-n--gram%20smoke%20verified-2E7D32.svg)](#research-status)
+[![Status](https://img.shields.io/badge/status-pipeline%20verified%2C%20results%20pending-2E7D32.svg)](#research-status)
 
-A lightweight research harness for validating published hallucination detectors
-before using them to compare hallucination-reduction methods. The repository
-does not recreate detector algorithms: it connects pinned official packages to
-one consistent data and evaluation interface.
+A local research harness that answers two questions, in this order:
 
-> **Important:** source integration is complete, but runtime reproduction and
-> research results are still pending. Synthetic examples are smoke fixtures,
-> not evidence for a paper.
+1. **Which hallucination detectors can be trusted?** Every detector scores
+   answers whose label is already known (faithful or hallucinated), and we
+   measure how well it separates them.
+2. **Which reduction methods actually reduce hallucination?** Every model
+   answers the same questions with and without each method, and the same
+   detectors compare the answers.
 
-![Research pipeline: labeled data flows through official detectors and validation before a reduction study.](assets/diagrams/research-pipeline.png)
+Every detector, reduction method and dataset comes from its **official,
+citable source**, pinned to an exact version; this repository only connects
+them, runs them the same way, and reports the results. Everything runs on one
+machine: the language models through Ollama, the detectors in local Python
+environments.
 
-*Figure 1. Intended research workflow. The local Ollama generators are needed
-for SelfCheckGPT sampling and the reduction stage. Every reported run must
-preserve its source, license, checkpoint, and environment metadata.*
+> **Status:** the pipeline is complete and verified end to end; the research
+> results are still to be produced by a full run (see
+> [Research status](#research-status)).
+
+## How a run works
+
+```mermaid
+flowchart TD
+    start(["python scripts/run_full.py"]) --> plan["Read the run plan<br/>(config.yaml → run: runs, questions,<br/>detectors, samples, reduction methods)"]
+    plan --> setup["Setup<br/>download datasets + model weights, pull Ollama models,<br/>verify every file's SHA-256"]
+    setup --> pre["Preflight<br/>one real question through every detector,<br/>every model and every reduction method"]
+    pre -->|anything fails| stop(["Stop in minutes, with the reason<br/>(nothing long has started)"])
+    pre -->|all pass| est["Print the time estimate"]
+    est --> runs["run_01 … run_N<br/>(same questions, fresh model sampling each run)"]
+    runs --> a["Stage A · detector validation"]
+    a --> b["Stage B · reduction methods"]
+    b --> rep["Report for this run"]
+    rep -->|next run| runs
+    rep --> comb["Combined report<br/>mean ± std over all runs"]
+    comb --> out(["report.docx · report.html · REPORT.md · takeaways.md<br/>+ charts and CSV tables"])
+```
+
+`main.py` runs this flow for one Python environment. `scripts/run_full.py`
+runs it once per environment (the detectors' official packages need
+conflicting library versions) and then combines everything; details in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+## What happens to one question
+
+```mermaid
+flowchart LR
+    q["Question + context<br/>(HaluEval · RAGTruth · HaluBench)"]
+    lab["Known answers<br/>faithful ✓ / hallucinated ✗"]
+    gen["Each model (Ollama)<br/>answers 5 times → samples"]
+
+    subgraph A["Stage A · can the detectors be trusted?"]
+        det1["Detectors score the known answers"]
+        met["AUROC · AUPRC · F1<br/>per detector (and per model)"]
+        det1 --> met
+    end
+
+    subgraph B["Stage B · do the methods reduce hallucination?"]
+        base["Baseline answer<br/>(with context)"]
+        meth["Same question, each method:<br/>closed-book · greedy · Self-Refine ·<br/>Chain-of-Verification · UQLM best answer"]
+        det2["The same detectors score<br/>every answer"]
+        delta["Change vs. baseline on the same question<br/>(lower risk = better)"]
+        base --> meth --> det2 --> delta
+        base --> det2
+    end
+
+    q --> lab --> det1
+    q --> gen --> det1
+    gen --> det2
+    q --> base
+```
+
+The samples a model draws for a question are drawn **once** and shared by
+every sampling-based detector, by every known answer to that question, and
+by every reduction method's answer, so all comparisons use identical
+evidence.
 
 ## Research objective
 
@@ -30,19 +91,31 @@ The project separates two questions that should not be mixed:
    mitigation method improve paired model outputs without unacceptable losses
    in correctness, relevance, latency, or cost?
 
-Every run first downloads (and checksum-verifies) any missing data, pulls
-missing Ollama models, and runs a one-case preflight of the whole pipeline;
-see [`docs/HOW_TO_RUN.md`](docs/HOW_TO_RUN.md#1-how-every-run-protects-your-time).
-Everything runs locally: the generator models are served by Ollama, and the
-detectors run in local Python environments.
-
 ## Official detectors
 
-![Comparison of SelfCheckGPT, MiniCheck, SummaC, and AlignScore inputs and scoring flows.](assets/diagrams/official-detectors.png)
+```mermaid
+flowchart LR
+    ans["Answer to check"]
+    subgraph S["Compare with the model's own samples"]
+        sc["SelfCheckGPT<br/>n-gram · BERTScore · NLI · LLM prompt"]
+        uq["UQLM consistency<br/>semantic entropy · NLI · cosine ·<br/>exact match · BERTScore"]
+    end
+    subgraph C["Compare with the context"]
+        jd["UQLM LLM-as-a-judge<br/>(separate judge model)"]
+        mc["MiniCheck"]
+        su["SummaC"]
+        al["AlignScore"]
+    end
+    ans --> S
+    ans --> C
+    S --> r["risk score<br/>(higher = more likely hallucinated)"]
+    C --> r
+```
 
-*Figure 2. The detector families are related but not interchangeable.
-SelfCheckGPT measures consistency across sampled generations; MiniCheck,
-SummaC, and AlignScore measure support against supplied evidence.*
+*The detector families answer different questions: the sampling-based ones
+ask "does this answer agree with what the model says when asked again?", the
+context-based ones ask "is this answer supported by the supplied context?".
+Every score is oriented the same way.*
 
 Every detector below runs from its official package at a pinned version; the
 files under `detectors/` are thin adapters. Full details, including every
@@ -153,27 +226,28 @@ is not “reproduced” merely because its adapter imports successfully.
 
 ```text
 config.yaml                      the one configuration (run plan at the top)
-requirements.txt                 the one install (controller + SelfCheckGPT)
-requirements/                    isolated per-detector envs, installed by run_full.py
-assets/diagrams/                 original README figures
-benchmark/runner.py              fixed-response orchestration (all selected models)
-benchmark/detector_validation.py labeled evaluation metrics
-benchmark/reduction_runner.py    Stage B: paired baseline vs. reduced-answer comparison
-data/datasets.py                 normalized paired cases
-detectors/                       thin upstream-package adapters
-reducers/                        self_refine (adapted), cove (local impl.), uqlm_best_response (official)
-detectors/sampling.py            samples shared by every sampling-based detector
-models/prompts.py                the grounded / closed-book prompts every stage shares
-models/                          local Ollama adapter (+ replay model for tests)
-utils/console.py                 terminal layout, progress bars, run.log
-utils/run_manifest.py            run_manifest.json / config_used.yaml / environment.txt
-scripts/run_full.py              runs every detector (own venv) + reduction, one report
-reporting/                       per-run + combined reports: report.docx/.html/REPORT.md, charts, tables
+requirements.txt                 the one install: controller + SelfCheckGPT + UQLM ("core")
+requirements/                    isolated environments for MiniCheck / SummaC / AlignScore
+main.py                          one environment: setup → preflight → runs → reports
+scripts/run_full.py              every environment, then the combined report
 scripts/generate_report.py       rebuild reports for an existing results folder
-utils/resources.py               pinned downloads (HaluEval, AlignScore ckpt) + checksums
-benchmark/preflight.py           one-case check of every detector/model before long stages
 scripts/prepare_halueval.py      optional: pre-download HaluEval only
-provenance/sources.yaml          commits, licenses, and integration status
+data/datasets.py                 HaluEval, RAGTruth, HaluBench loaders → questions + labeled answers
+models/                          Ollama adapter, shared prompts (+ replay model for tests)
+detectors/                       thin adapters around the official detector packages
+detectors/sampling.py            samples shared by every sampling-based detector
+reducers/                        Self-Refine (adapted), CoVe (local impl.), UQLM best response (official)
+benchmark/runner.py              Stage A: every detector on the labeled answers
+benchmark/reduction_runner.py    Stage B: every method's answer, paired with the baseline
+benchmark/preflight.py           one-question check of everything before long stages
+benchmark/detector_validation.py AUROC / AUPRC / F1 / failures
+reporting/                       per-run + combined reports (docx / html / md), charts, tables
+utils/resources.py               pinned, checksummed downloads (data, weights)
+utils/run_manifest.py            run_manifest.json / config_used.yaml / environment.txt
+utils/console.py                 terminal layout, progress bars, run.log
+provenance/sources.yaml          commits, licenses, and integration status of every source
+docs/ARCHITECTURE.md             how the pieces fit together (diagrams)
+docs/HOW_TO_RUN.md               setup, smoke test, full run, every output file
 docs/REPRODUCIBILITY.md          provenance and experiment policy
 docs/MITIGATION_METHODS.md       reduction-method decisions
 CITATION.bib                     paper citations used by this project
@@ -186,6 +260,6 @@ CITATION.bib                     paper citations used by this project
 - Reproducibility policy: [`docs/REPRODUCIBILITY.md`](docs/REPRODUCIBILITY.md)
 - BibTeX references: [`CITATION.bib`](CITATION.bib)
 
-When reporting a detector, cite its original paper and official repository—not
-this adapter as the algorithm. The two diagrams above are original explanatory
-graphics for this repository and are not copied from any cited paper.
+When reporting a detector or method, cite its original paper and official
+repository, not this adapter as the algorithm. The diagrams in this README are
+original explanatory graphics for this repository.

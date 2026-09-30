@@ -137,29 +137,3 @@ class ModelFactory:
                 logger.error(f"Cannot register '{name}': {e}")
 
         return models
-
-    # ── interactive helper ────────────────────────────────────
-
-    @staticmethod
-    def show_available(host: str = "http://localhost:11434"):
-        """Print all installed Ollama models in a rich table."""
-        from rich.console import Console
-        from rich.table import Table
-        from rich import box
-
-        installed = OllamaModel.list_installed(host)
-        c = Console()
-
-        if not installed:
-            c.print("[red]No Ollama models installed or Ollama is not running.[/red]")
-            c.print(f"  Start: [cyan]ollama serve[/cyan]")
-            c.print(f"  Pull:  [cyan]ollama pull llama3.2:3b[/cyan]")
-            return
-
-        t = Table(title="Installed Ollama Models", box=box.ROUNDED, header_style="bold cyan")
-        t.add_column("#",         justify="right", style="dim")
-        t.add_column("Model Tag", style="green")
-        for i, tag in enumerate(sorted(installed), 1):
-            t.add_row(str(i), tag)
-        c.print(t)
-        c.print(f"\n[dim]Total: {len(installed)} models[/dim]")
