@@ -72,6 +72,21 @@ anything:
 python main.py --dry-run --detectors selfcheckgpt uqlm uqlm_judge
 ```
 
+### 0.5 Updating a machine that is already set up
+
+After new code has been pushed:
+
+```bash
+cd LLM-hallucination-Research
+git pull
+source .venv/bin/activate
+pip install -r requirements.txt     # the core environment picks up new packages
+```
+
+The MiniCheck / SummaC / AlignScore environments need nothing by hand:
+`run_full.py` reinstalls one automatically when its `requirements/<name>.txt`
+changed. Make sure Ollama is running, then start with the smoke test (§3).
+
 ## 1. How every run protects your time
 
 Every `main.py` run goes through the same order, and stops at the first
@@ -147,7 +162,19 @@ python scripts/run_full.py --runs 2 --max-samples 2 --n-samples 2 --max-iteratio
 ```
 
 (`--max-samples` is questions **per dataset**; `--runs` is the number of
-independent repeats.)
+independent repeats. The output folder must be new: a run refuses a folder
+that already holds results, so old and new runs can never mix.)
+
+The same smoke test with **every** detector, including the opt-in AlignScore
+(its ~1.9 GB checkpoint is downloaded on first use), and every reduction
+method:
+
+```bash
+python scripts/run_full.py \
+  --detectors selfcheckgpt uqlm uqlm_judge minicheck summac alignscore \
+  --runs 2 --max-samples 2 --n-samples 2 --max-iterations 1 \
+  --output results/smoke-all
+```
 
 Check: the final table shows ✓ for every environment, the results tables
 show `n_failed` 0 (a few failures for SelfCheckGPT BERTScore on very short
