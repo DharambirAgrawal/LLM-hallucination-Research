@@ -131,3 +131,6 @@ results/*
 .mypy_cache/
 .dmypy.json
 dmypy.
+
+# scripts/share_logs.py output
+debug_report.txt

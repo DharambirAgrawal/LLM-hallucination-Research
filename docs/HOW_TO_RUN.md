@@ -365,6 +365,25 @@ off the GPU from the start, run with `--device cpu`.
 While a run is going you can watch memory with `nvidia-smi` and see which
 models Ollama holds with `ollama ps`.
 
+## Sending the errors when something fails
+
+The GPU machine does not need a git account for this. After a failed (or
+strange) run, from the project folder:
+
+```bash
+python scripts/share_logs.py --upload
+```
+
+It writes `debug_report.txt` (git commit, GPU and Ollama status, the config,
+every distinct error with a count, the last tracebacks, failed cases per CSV,
+the end of each log) and uploads it to paste.rs. It then prints a short link
+such as `https://paste.rs/AbC1`: send that link, and the report can be read
+from any computer. Without `--upload` nothing leaves the machine. The report
+contains no API keys or `.env` content and hides the home folder path, but
+anyone with the link can read it. Add a results folder
+(`python scripts/share_logs.py results/<run> --upload`) to report an older run
+instead of the newest.
+
 ## Useful flags
 
 | Flag | `main.py` | `run_full.py` | What it does |

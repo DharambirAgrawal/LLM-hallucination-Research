@@ -222,6 +222,7 @@ def main() -> None:
         console.line()
         console.line("Nothing long was started. Fix the items above and run the same command again;")
         console.line("installed environments and downloads are reused.")
+        console.line("To share the errors for help: python scripts/share_logs.py --upload")
         raise SystemExit(1)
 
     # Phase 2: the runs. core first: the other groups score its reduction answers.
@@ -267,6 +268,8 @@ def main() -> None:
     console.header(f"Finished in {console.duration(time.monotonic() - started)}")
     for name, status, seconds in results:
         console.line(f"{'✓' if status == 'ok' else '✗'} {name:<11} {console.duration(seconds):>9}   {status}")
+    if any(status != "ok" for _, status, _ in results):
+        console.line("To share the errors for help: python scripts/share_logs.py --upload")
     if not ran:
         raise SystemExit("\nNo detector group produced results; nothing to report.")
     console.line()
