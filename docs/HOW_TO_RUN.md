@@ -335,6 +335,36 @@ of silently continuing on partial data.
   section. MiniCheck uses the GPU by itself when one is present.
   SelfCheckGPT's n-gram and prompt scorers need no GPU.
 
+### GPU memory: how models are loaded
+
+Ollama and the detectors share the GPU. Models are used **one at a time**:
+each generator is loaded when it is first asked, and unloaded
+(`keep_alive=0`) as soon as its part is done, in the preflight, the detector
+validation and the reduction stage. So at most one generator, plus the judge
+(`mistral:7b`) and the detectors' torch models (~6 GB in total), share the
+GPU at any moment.
+
+`gpt-oss:20b` needs ~13 GB by itself; the other generators need 2–5 GB. On a
+smaller GPU, memory runs out while a model loads. The run then recovers on its
+own instead of failing:
+
+1. **An Ollama model does not fit** ("model failed to load … resource
+   limitations"): the other models loaded in Ollama are unloaded, the torch
+   detectors are moved to the CPU for the rest of the run, and the request is
+   retried.
+2. **A detector runs out of GPU memory** ("CUDA out of memory"): the torch
+   cache is freed and the case retried; if it fails again, that detector
+   is reloaded on the CPU for the rest of the run.
+
+Each move is logged as a warning, and the device used is recorded in
+`config_used.yaml`. The scores are the same on the CPU; only slower. If a model
+still does not fit, the error says so; check `nvidia-smi` for other programs
+using the GPU, or replace the model with a smaller one. To keep the detectors
+off the GPU from the start, run with `--device cpu`.
+
+While a run is going you can watch memory with `nvidia-smi` and see which
+models Ollama holds with `ollama ps`.
+
 ## Useful flags
 
 | Flag | `main.py` | `run_full.py` | What it does |

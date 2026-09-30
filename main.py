@@ -523,6 +523,7 @@ def main() -> None:
 
     console.section("Preflight (one real case through every detector, model and stage)")
     runner = BenchmarkRunner(config, generator=generators[0] if generators else None)
+    runner.attach(generators)   # a model that does not fit can take the detectors' GPU memory
     estimate = run_preflight(config, runner, datasets, generators, reduce_on)
     per_run_seconds = sum(estimate.values())
     if per_run_seconds:

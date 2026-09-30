@@ -69,6 +69,25 @@ def _apply(row: dict, fam: "Family", values: Dict[str, object]) -> Optional[str]
     return partial
 
 
+# families whose models take a `device` setting and can be moved to the CPU
+CPU_CAPABLE = ("selfcheckgpt", "uqlm", "summac", "alignscore")
+
+
+def _is_out_of_memory(exc: BaseException) -> bool:
+    return "out of memory" in str(exc).lower() or type(exc).__name__ == "OutOfMemoryError"
+
+
+def _free_gpu_cache() -> None:
+    """Give memory torch has cached but no longer uses back to the GPU, so
+    Ollama (a separate process) can load the next model."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 class BenchmarkRunner:
     """Detector-validation harness; it contains no detection algorithm."""
 
@@ -81,8 +100,12 @@ class BenchmarkRunner:
         self.bank = SampleBank(int(sc.get("n_samples", 5)), float(sc.get("temperature", 1.0)))
         self.detectors: Dict[str, object] = {}
         self.families: Dict[str, Family] = {}
-        self._build(config.get("detectors", {}), config.get("judge", {}),
-                    config.get("ollama", {}).get("host", "http://localhost:11434"))
+        self._judge = config.get("judge", {})
+        self._host = config.get("ollama", {}).get("host", "http://localhost:11434")
+        self._raw: Dict[str, Callable] = {}
+        self._build(config.get("detectors", {}), self._judge, self._host)
+        for name in list(self.families):
+            self._guard(name)
         # Scores of deterministic, generator-independent detectors, reused
         # by later runs instead of recomputing identical numbers.
         self._fixed_scores: Dict[str, dict] = {}
@@ -161,6 +184,74 @@ class BenchmarkRunner:
 
         if not self.families:
             logger.warning("No detector is enabled in the configuration")
+
+    # ── GPU memory: the detectors share the GPU with Ollama ─────────────
+    def _guard(self, name: str) -> None:
+        """Route family `name` through out-of-memory recovery."""
+        self._raw[name] = self.families[name].score
+        self.families[name].score = lambda case, g, n=name: self._call(n, case, g)
+
+    def _call(self, name: str, case: dict, generator) -> Dict[str, object]:
+        """Score one case. On a GPU out-of-memory error (Ollama may have
+        loaded a large model into the memory the detector needed): free
+        torch's cache and retry; if it happens again, reload this detector on
+        the CPU for the rest of the run (same scores, slower) and retry."""
+        def attempt() -> Dict[str, object]:
+            values = self._raw[name](case, generator)
+            # SelfCheckGPT isolates each scorer's error instead of raising
+            if "out of memory" in str(values.get("__errors__") or "").lower():
+                raise RuntimeError(f"CUDA out of memory: {values['__errors__']}")
+            return values
+
+        try:
+            result = attempt()
+        except Exception as exc:
+            if not _is_out_of_memory(exc):
+                raise
+            _free_gpu_cache()
+            try:
+                result = attempt()
+            except Exception as again:
+                if not _is_out_of_memory(again):
+                    raise
+                self._move_to_cpu(name)
+                result = attempt()
+        _free_gpu_cache()
+        return result
+
+    def attach(self, generators: list) -> None:
+        """Let each Ollama generator ask for GPU memory when its model does
+        not fit (see OllamaModel._make_room)."""
+        for g in generators:
+            if hasattr(g, "on_memory_pressure"):
+                g.on_memory_pressure = self.free_gpu
+
+    def free_gpu(self) -> None:
+        """Move every detector still on the GPU to the CPU for the rest of the
+        run, so Ollama can load a model that did not fit."""
+        detectors = self.config.get("detectors", {})
+        for name in [n for n in CPU_CAPABLE if n in self.families]:
+            if detectors.get(name, {}).get("device") != "cpu":
+                self._move_to_cpu(name, reason="an Ollama model needed the GPU memory")
+        _free_gpu_cache()
+
+    def _move_to_cpu(self, name: str, reason: str = "GPU out of memory twice") -> None:
+        cfg = dict(self.config.get("detectors", {}).get(name, {}))
+        if name not in CPU_CAPABLE or cfg.get("device") == "cpu":
+            raise RuntimeError(f"{name}: out of memory twice, even after freeing the GPU cache. "
+                               "Free GPU memory (smaller Ollama model, or `device: cpu` for the "
+                               "detectors in config.yaml)")
+        logger.warning(f"{name}: {reason}; reloading it on the CPU for the rest of "
+                       "this run (same scores, slower)")
+        old = self.detectors.pop(name, None)
+        cfg.update(enabled=True, device="cpu")
+        self.config.setdefault("detectors", {})[name] = cfg
+        self._build({name: cfg}, self._judge, self._host)
+        del old
+        import gc
+        gc.collect()
+        _free_gpu_cache()
+        self._guard(name)
 
     # ── public helpers ──────────────────────────────────────────────────
     def thresholds(self) -> Dict[str, float]:
@@ -252,8 +343,7 @@ class BenchmarkRunner:
         logger.debug("Saved raw detector validation to {}", output)
         return frame
 
-    @staticmethod
-    def _score_all(rows: List[dict], families: List[Family], label: str, generator) -> None:
+    def _score_all(self, rows: List[dict], families: List[Family], label: str, generator) -> None:
         """Fill every family's columns on every row, with one progress bar
         and a one-line outcome per family. Tracebacks go to run.log."""
         started = time.monotonic()

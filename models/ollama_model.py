@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Dict, List
+from typing import Callable, Dict, List, Optional
 
 from loguru import logger
 
@@ -47,6 +47,13 @@ class OllamaModel(BaseModel):
     """
 
     _THINK_BLOCK = re.compile(r"<think>.*?(</think>|$)", re.DOTALL | re.IGNORECASE)
+    # Ollama's wording when a model does not fit in GPU/RAM
+    _NO_ROOM = ("resource limitations", "failed to load", "out of memory", "cudamalloc",
+                "requires more system memory", "insufficient memory")
+
+    # Set by the benchmark: frees GPU memory held in this process (moves the
+    # torch detectors to the CPU) when a model does not fit.
+    on_memory_pressure: Optional[Callable[[], None]] = None
 
     def __init__(self, name: str, config: dict, ollama_host: str = "http://localhost:11434"):
         super().__init__(name, config)
@@ -123,6 +130,8 @@ class OllamaModel(BaseModel):
                         f"Model '{self.model_tag}' not found in Ollama "
                         f"(run: ollama pull {self.model_tag})"
                     ) from exc
+                if any(k in last_error.lower() for k in self._NO_ROOM):
+                    self._make_room()
                 wait = 5 * 2 ** attempt
                 logger.debug(
                     f"[{self.name}] attempt {attempt + 1}/3 failed: "
@@ -142,6 +151,27 @@ class OllamaModel(BaseModel):
 
         raise RuntimeError(self._explain(last_error))
 
+    def _make_room(self) -> None:
+        """The model did not fit: unload every other model Ollama holds (a
+        previous generator, the judge) and let the benchmark free the GPU
+        memory its detectors use, then the caller retries."""
+        logger.warning(f"[{self.name}] {self.model_tag} did not fit in memory; unloading other "
+                       "Ollama models and freeing detector GPU memory, then retrying")
+        try:
+            loaded = self._client.ps().get("models", [])
+        except Exception as exc:
+            logger.debug(f"[{self.name}] could not list loaded models: {exc}")
+            loaded = []
+        for entry in loaded:
+            tag = entry.get("model") or entry.get("name")
+            if tag and tag != self.model_tag:
+                try:
+                    self._client.generate(model=tag, prompt="", keep_alive=0)
+                except Exception as exc:
+                    logger.debug(f"[{self.name}] could not unload {tag}: {exc}")
+        if self.on_memory_pressure is not None:
+            self.on_memory_pressure()
+
     def _explain(self, error: str) -> str:
         """Turn Ollama's raw error into what happened and what to do."""
         low = error.lower()
@@ -149,9 +179,10 @@ class OllamaModel(BaseModel):
         if "timed out" in low or "timeout" in low:
             return (f"{where}: no answer within {self.timeout}s. Large models can need minutes to load "
                     f"the first time; raise `ollama.timeout` in config.yaml. Last error: {error}")
-        if "memory" in low or "cuda" in low or "out of" in low:
-            return (f"{where}: Ollama could not load the model ({error}). Free GPU memory: "
-                    "set `device: cpu` for the detectors in config.yaml, or use a smaller model.")
+        if any(k in low for k in self._NO_ROOM) or "memory" in low or "cuda" in low:
+            return (f"{where}: out of memory, the model does not fit even after unloading the other "
+                    f"Ollama models and moving the detectors to the CPU ({error}). Check `nvidia-smi` "
+                    "for other programs using the GPU, or replace this model with a smaller one.")
         if "think" in low:
             return (f"{where}: this Ollama version does not accept `think` ({error}). Update Ollama "
                     "(0.9 or newer), or remove `think` from this model in config.yaml.")

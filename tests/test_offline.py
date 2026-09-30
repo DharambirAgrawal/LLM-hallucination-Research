@@ -322,6 +322,35 @@ class AdapterContractTests(unittest.TestCase):
             self.assertEqual(len(frame), 4)  # 2 cases (factual/hallucinated) x 2 models
             self.assertTrue(frame["selfcheckgpt_ngram_score"].notna().all())
 
+    def test_gpu_out_of_memory_moves_the_detector_to_cpu(self):
+        """An OOM that survives one cache-free retry reloads the detector on
+        the CPU; the case is still scored and the change is in the config."""
+        config = {"detectors": {"summac": {"enabled": True, "device": "cuda"}},
+                  "benchmark": {"output_dir": tempfile.mkdtemp()}}
+        runner = BenchmarkRunner(config)
+        calls = []
+
+        def out_of_memory(context, answer):
+            calls.append(1)
+            raise RuntimeError("CUDA out of memory. Tried to allocate 20.00 MiB")
+        runner.detectors["summac"].detect = out_of_memory
+        case = {"question": "q", "context": self.context, "answer": self.factual}
+        scores = runner.families["summac"].score(case, None)
+        self.assertEqual(len(calls), 2)                 # first try + one retry on the GPU
+        self.assertIsNotNone(scores["summac"])          # then scored on the CPU
+        self.assertEqual(runner.config["detectors"]["summac"]["device"], "cpu")
+        self.assertIsNot(runner.detectors["summac"].detect, out_of_memory)
+
+    def test_other_errors_are_not_retried(self):
+        runner = BenchmarkRunner({"detectors": {"summac": {"enabled": True}},
+                                  "benchmark": {"output_dir": tempfile.mkdtemp()}})
+
+        def broken(context, answer):
+            raise ValueError("bad input")
+        runner.detectors["summac"].detect = broken
+        with self.assertRaises(ValueError):
+            runner.families["summac"].score({"question": "q", "context": "c", "answer": "a"}, None)
+
     def test_validate_requires_a_generator_when_selfcheckgpt_is_enabled(self):
         config = {
             "detectors": {"selfcheckgpt": {"enabled": True, "method": "ngram"}},
@@ -883,6 +912,42 @@ class RunIntegrityTests(unittest.TestCase):
             model = OllamaModel("m", {"model": "m:1b"})
             with self.assertRaises(RuntimeError):
                 model.generate("hi")
+
+    def test_model_that_does_not_fit_gets_room_and_retries(self):
+        """Ollama's "failed to load … resource limitations": other loaded
+        models are unloaded, the benchmark frees GPU memory, and the retry
+        succeeds."""
+        fake_ollama = types.ModuleType("ollama")
+        unloaded, freed = [], []
+
+        class TightClient:
+            calls = 0
+
+            def __init__(self, host=None, **kwargs):
+                pass
+
+            def chat(self, **kwargs):
+                TightClient.calls += 1
+                if TightClient.calls == 1:
+                    raise RuntimeError("model failed to load, this may be due to resource "
+                                       "limitations or an internal error")
+                return {"message": {"content": "Four."}}
+
+            def ps(self):
+                return {"models": [{"model": "mistral:7b"}, {"model": "gpt-oss:20b"}]}
+
+            def generate(self, model, prompt, keep_alive):
+                unloaded.append(model)
+
+        fake_ollama.Client = TightClient
+        with patch.dict(sys.modules, {"ollama": fake_ollama}), \
+                patch("models.ollama_model.time.sleep"):
+            from models.ollama_model import OllamaModel
+            model = OllamaModel("gpt-oss-20b", {"model": "gpt-oss:20b"})
+            model.on_memory_pressure = lambda: freed.append(1)
+            self.assertEqual(model.generate("2 + 2?"), "Four.")
+        self.assertEqual(unloaded, ["mistral:7b"])   # not the model being loaded
+        self.assertEqual(freed, [1])
 
 
 if __name__ == "__main__":
