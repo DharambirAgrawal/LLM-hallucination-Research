@@ -76,7 +76,7 @@ flowchart TD
     e --> f{"for run 1 … N"}
     f --> g["Stage A · runner.validate()"]
     g --> h["Stage B · ReductionRunner.run()<br/>(or score another environment's answers)"]
-    h --> i["Archive: samples.jsonl · run_manifest.json ·<br/>config_used.yaml · environment.txt"]
+    h --> i["Archive: selfcheckgpt_samples.jsonl ·<br/>run_manifest.json · config_used.yaml · environment.txt"]
     i --> j["Report for this run · reporting/"]
     j --> f
     f -->|done| k["Combined report · reporting/<br/>mean ± std over runs"]
@@ -150,9 +150,9 @@ Two details keep this comparison fair:
 
 - **Same evidence.** Every answer to a question is scored against the same
   samples, so differences come from the answers, not from new randomness.
-- **Leave-one-out.** When `uqlm_best_response` picks one of the samples, that
-  sample is taken out of its own evidence (replaced by the baseline answer);
-  otherwise it would be scored against a copy of itself.
+- **Leave-one-out.** When `uqlm_best_response` picks one of the samples, every
+  exact copy of it is taken out of its evidence and the baseline answer is
+  added; otherwise it would be scored against a copy of itself.
 
 ## 6. What a results folder contains
 
@@ -183,7 +183,8 @@ Two details keep this comparison fair:
 | Failures are recorded, never scored as 0 | `*_error` columns, `n_failed` | a crash must not look like a result |
 | One sample set per model and question | `detectors/sampling.py` | paired comparisons on identical evidence |
 | One model at a time | `benchmark/runner.py` | Ollama keeps one model loaded |
-| Same outputs for smoke and full runs | `main.py`, `reporting/` | a smoke test checks exactly what the full run produces |
+| Same outputs for smoke and full runs | `scripts/run_full.py` with small numbers | a smoke test checks every environment the full run uses |
+| Never mix runs | `main.py` refuses an output folder that already holds runs | a combined report must only contain this run's repeats |
 
 ## 8. Extending it
 

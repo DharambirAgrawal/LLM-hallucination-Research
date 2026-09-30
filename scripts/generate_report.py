@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Rebuild the reports of an existing results folder.
 
-    python scripts/generate_report.py --input results/full-run-X/selfcheckgpt/run_01
+    python scripts/generate_report.py --input results/full-run-X/core/run_01
     python scripts/generate_report.py --input results/full-run-X --combined
 
 main.py and scripts/run_full.py already call this for every run folder and

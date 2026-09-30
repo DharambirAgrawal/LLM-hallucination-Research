@@ -112,7 +112,8 @@ def requirements_hash(requirements: str) -> str:
 def ensure_python(name: str, requirements: str, log_dir: Path) -> Path:
     """Return the interpreter that runs `name`, installing its venv if needed."""
     if name == "core" and all(importlib.util.find_spec(m) for m in ("selfcheckgpt", "uqlm")):
-        console.line("environment      this interpreter (requirements.txt already installed)")
+        console.line("environment      this interpreter (requirements.txt already installed; "
+                     "after a git pull run `pip install -r requirements.txt` again)")
         return Path(sys.executable)
 
     venv_dir = ROOT / f".venv-{name}"
@@ -144,8 +145,10 @@ def ensure_python(name: str, requirements: str, log_dir: Path) -> Path:
 def main() -> None:
     args = parse_args()
     started = time.monotonic()
+    # Absolute: main.py runs with cwd=ROOT, so a relative path would split
+    # the output between two places.
     output_dir = (
-        Path(args.output) if args.output
+        Path(args.output).resolve() if args.output
         else ROOT / "results" / f"full-run-{datetime.now():%Y%m%d-%H%M%S}"
     )
     log_dir = output_dir / "logs"
@@ -177,7 +180,7 @@ def main() -> None:
     def main_args(name: str) -> list[str]:
         cmd_args = ["--config", args.config, "--detectors", *envs[name],
                     "--output", str(output_dir / name)]
-        if name != "core" and reduce_on:
+        if name != "core" and reduce_on and core_ok:
             cmd_args += ["--score-reduction-from", str(output_dir / "core")]
         for flag, value in (("--runs", args.runs), ("--max-samples", args.max_samples),
                             ("--n-samples", args.n_samples), ("--max-iterations", args.max_iterations),
@@ -188,6 +191,7 @@ def main() -> None:
             cmd_args.append("--no-reduce")
         return cmd_args
 
+    core_ok = True   # set False if core fails in phase 2: nothing to score then
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     total = len(args.detectors)
 
@@ -238,6 +242,10 @@ def main() -> None:
             results.append((name, "ok", seconds))
         else:
             results.append((name, f"failed (exit {code}) — see {output_dir / name / 'run.log'}", seconds))
+            if name == "core" and reduce_on:
+                core_ok = False
+                console.line("⚠ core failed: the other environments run Stage A only "
+                             "(there are no reduction answers to score)")
 
     ran = [name for name, status, _ in results if status == "ok"]
     produced = {}

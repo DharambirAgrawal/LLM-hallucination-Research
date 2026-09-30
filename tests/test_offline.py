@@ -525,10 +525,9 @@ class ReductionRunnerTests(unittest.TestCase):
             frame = ReductionRunner(config, runner).run(datasets, generators=[model])
             best = frame[frame["condition"] == "uqlm_best_response"].iloc[0]
             evidence = dict(seen)[f"{best['sample_id']}:uqlm_best_response"]
-            self.assertIn("1991", best["answer"])                 # a sample was picked
-            self.assertEqual(evidence.count(best["answer"]), 1)    # 2 identical samples → one left out
+            self.assertIn("1991", best["answer"])                  # a sample was picked
+            self.assertNotIn(best["answer"], evidence)              # every copy removed, not just one
             self.assertIn("Python was released in 1985.", evidence)  # the baseline joins the evidence
-            self.assertEqual(len(evidence), 2)
 
     def test_one_failing_selfcheck_scorer_keeps_the_others(self):
         import selfcheckgpt.modeling_selfcheck as upstream
@@ -697,6 +696,29 @@ class RunIntegrityTests(unittest.TestCase):
             self.assertEqual(sorted(by_run["run"].unique()), ["run_01", "run_02"])
             for name in ("REPORT.md", "report.html", "report.docx", "takeaways.md", "raw_all_runs.csv"):
                 self.assertTrue((root / "combined" / name).is_file(), name)
+
+    def test_reduction_scores_from_every_environment_are_kept(self):
+        """MiniCheck's and SummaC's reduction_scores.csv share the same keys;
+        both environments' columns must survive the merge, for every run."""
+        import pandas as pd
+        from reporting import aggregate as agg
+        keys = {"sample_id": "q1", "model": "m", "condition": "baseline"}
+
+        def run(folder, run_name, reduction=None, scores=None):
+            return agg.RunData(folder=Path(folder) / run_name, run=run_name,
+                               summary=pd.DataFrame(), raw=None,
+                               reduction=reduction, reduction_scores=scores,
+                               manifest=None, config=None)
+        runs = []
+        for name in ("run_01", "run_02"):
+            runs.append(run("core", name, reduction=pd.DataFrame([{**keys, "run": name, "answer": "a",
+                                                                   "uqlm_judge_score": 0.1}])))
+            runs.append(run("minicheck", name, scores=pd.DataFrame([{**keys, "run": name, "minicheck_score": 0.2}])))
+            runs.append(run("summac", name, scores=pd.DataFrame([{**keys, "run": name, "summac_score": 0.3}])))
+        table = agg.reduction_table(runs)
+        self.assertEqual(len(table), 2)
+        self.assertTrue(table["minicheck_score"].notna().all())
+        self.assertTrue(table["summac_score"].notna().all())
 
     def test_run_plan_precedence_flag_over_section_over_plan(self):
         import argparse

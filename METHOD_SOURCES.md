@@ -149,8 +149,9 @@ scored by every detector against the same samples.
 Notes on `uqlm_best_response`: within the winning cluster UQLM returns the
 most repeated answer, otherwise the **longest** one (a length bias). Our
 prompts are not passed to its NLI step (with them, every answer fell into
-one cluster). The picked answer is scored **leave-one-out**, against the
-baseline + the other samples, so it is never compared with itself.
+one cluster). The picked answer is scored **leave-one-out**: against the
+baseline + the samples minus every exact copy of itself, so it is never
+compared with itself (its evidence can be smaller than the other methods').
 
 All other methods' answers are scored against the same samples as the
 baseline, and every answer in Stage B comes from the same model and prompt

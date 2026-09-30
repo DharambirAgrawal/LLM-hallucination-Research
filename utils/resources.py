@@ -110,6 +110,14 @@ def _key(path: str | Path) -> str:
     return path.as_posix()
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def download(remote: RemoteFile, destination: Path) -> None:
     """Stream `remote` to `destination` with a progress bar; verify SHA-256
     before the file appears under its final name."""
@@ -143,8 +151,11 @@ def ensure_file(path: str | Path, dry_run: bool = False) -> Optional[int]:
     target = Path(path) if Path(path).is_absolute() else ROOT / path
     remote = REMOTE_FILES.get(_key(path))
     label = remote.label if remote else _key(path)
-    if target.is_file() and (remote is None or target.stat().st_size == remote.size):
+    if target.is_file() and remote is None:
         console.line(f"✓ {label:<34} {_size(target.stat().st_size):>9}  present")
+        return None
+    if target.is_file() and target.stat().st_size == remote.size and _sha256(target) == remote.sha256:
+        console.line(f"✓ {label:<34} {_size(target.stat().st_size):>9}  present, sha256 verified")
         return None
     if remote is None:
         raise SystemExit(
@@ -155,7 +166,7 @@ def ensure_file(path: str | Path, dry_run: bool = False) -> Optional[int]:
         console.line(f"↓ {label:<34} {_size(remote.size):>9}  will be downloaded")
         return remote.size
     if target.exists():
-        console.line(f"↻ {label}: incomplete or changed file, downloading again")
+        console.line(f"↻ {label}: file does not match its recorded SHA-256, downloading again")
     download(remote, target)
     console.line(f"✓ {label:<34} {_size(remote.size):>9}  downloaded, sha256 verified")
     return remote.size

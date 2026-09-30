@@ -139,7 +139,9 @@ class BenchmarkRunner:
         for name, factory in (
             ("summac", lambda c: SummaCDetector(threshold=c.get("threshold", 0.5),
                                                 device=c.get("device", "cpu"),
-                                                model_name=c.get("model_name", "vitc"))),
+                                                model_name=c.get("model_name", "vitc"),
+                                                conv_weights=c.get("conv_weights",
+                                                    "external_models/summac/summac_conv_vitc_sent_perc_e.bin"))),
             ("minicheck", lambda c: MiniCheckDetector(model_name=c.get("model_name", "flan-t5-large"),
                                                       cache_dir=c.get("cache_dir", "external_models/minicheck"),
                                                       threshold=c.get("threshold", 0.5))),
@@ -212,15 +214,23 @@ class BenchmarkRunner:
 
         base_rows = [dict(case) for case in cases]
         for fam in fixed_families:
-            cached = self._fixed_scores.get(fam.name)
-            if cached is not None and all(row["case_id"] in cached for row in base_rows):
-                for row in base_rows:
+            # Successful scores are reused by later runs (deterministic);
+            # failed cases are scored again, so a transient error in run 1
+            # (e.g. an Ollama timeout for the judge) is not frozen in.
+            cached = self._fixed_scores.setdefault(fam.name, {})
+            todo = [row for row in base_rows if row["case_id"] not in cached]
+            for row in base_rows:
+                if row["case_id"] in cached:
                     row.update(cached[row["case_id"]])
+            if not todo:
                 console.line(f"✓ {fam.name} · reused first-run scores (deterministic, generator-independent)")
                 continue
-            self._score_all(base_rows, [fam], fam.name, None)
+            self._score_all(todo, [fam], fam.name if len(todo) == len(base_rows)
+                            else f"{fam.name} (retry {len(todo)})", None)
             keys = [f"{c}_score" for c in fam.columns] + [f"{fam.name}_error"]
-            self._fixed_scores[fam.name] = {row["case_id"]: {k: row[k] for k in keys} for row in base_rows}
+            for row in todo:
+                if not row.get(f"{fam.name}_error"):
+                    cached[row["case_id"]] = {k: row[k] for k in keys}
 
         if not gen_families:
             rows = base_rows

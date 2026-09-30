@@ -37,8 +37,8 @@ What it does: for each sample, a generator model answers once (baseline),
 then the same model is asked for feedback against the supplied context and
 revises its answer, repeating until it reports no remaining unsupported
 claims or a configured iteration budget (`reduction.max_iterations`) is
-spent. The already-configured, already-frozen SelfCheckGPT detector scores
-both the baseline and the revised answer so the two are directly comparable.
+spent. Every enabled detector scores both the baseline and the revised
+answer, against the same samples, so the two are directly comparable.
 
 Why it is not "Self-Refine" without qualification: the official repository's
 prompts and harnesses are task-specific (math, code, dialogue, acronym

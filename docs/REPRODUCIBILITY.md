@@ -101,19 +101,18 @@ of this repository alongside the report.
 ## Preparing official data on the execution machine
 
 Nothing to do by hand: every run's Setup step (`utils/resources.py`)
-fetches the three official HaluEval files with a matched right/
-hallucinated pair (`qa_data.json`, `dialogue_data.json`,
-`summarization_data.json`) from the commit pinned in
-`provenance/sources.yaml` when they are missing, and verifies each against
-its recorded SHA-256. Each run's `run_manifest.json` records the checksums
-of the files it used. `python scripts/prepare_halueval.py` does only this
-download, for a machine that will later run offline. `halueval_qa`, `halueval_dialogue`, and
-`halueval_summarization` are already enabled in `config.yaml` and point at
-these paths. `general_data.json` is not fetched: it labels a single response
+fetches every data file the enabled datasets need from its pinned source
+when it is missing, and verifies each against its recorded SHA-256: the
+three HaluEval files with a matched right/hallucinated pair
+(`qa_data.json`, `dialogue_data.json`, `summarization_data.json`), RAGTruth's
+`response.jsonl` + `source_info.jsonl`, and the HaluBench test parquet. Each
+run's `run_manifest.json` records the checksums of the files it used.
+`python scripts/prepare_halueval.py` downloads only the HaluEval files, for
+a machine that will later run offline. HaluEval's `general_data.json` is not fetched: it labels a single response
 hallucinated or not without a matched pair, so it does not fit this harness's
 paired-case schema (`data/datasets.py:detection_cases`).
 
-Equivalent by hand, if you'd rather not run the script:
+HaluEval by hand, if you'd rather not use the script:
 
 ```bash
 git clone https://github.com/RUCAIBox/HaluEval.git external_data/HaluEval

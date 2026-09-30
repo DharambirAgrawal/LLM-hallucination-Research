@@ -73,8 +73,7 @@ selected_models: ["llama3.2-3b", "qwen2.5-7b", "deepseek-r1-7b", "gemma3-4b", "g
 # gives 3 genuinely different task types instead of one repeating synthetic
 # pool. main.py downloads the official files at the commit pinned in
 # provenance/sources.yaml (sha256-verified) if they are missing, then these
-# three load real, distinct rows — nothing here repeats past `max_samples` the way
-# `synthetic` below does once you exceed its small fixed pool. Size comes
+# three load real, distinct rows, as do RAGTruth and HaluBench below. Size comes
 # from run.samples_per_dataset (a dataset's own `max_samples` wins); it is a
 # random subset drawn with benchmark.seed, not the first N rows, and the
 # same subset is used in every run.
@@ -164,7 +163,7 @@ datasets:
 
   # Small fixed pool (8 contexts) that repeats once max_samples exceeds it —
   # engineering smoke data only, kept small on purpose. Do not report it as
-  # a research result; the three HaluEval datasets above are the real data.
+  # a research result; the HaluEval, RAGTruth and HaluBench datasets above are the real data.
   - name: "synthetic"
     enabled: false          # smoke fixture only; enable for plumbing tests
     source: "synthetic"

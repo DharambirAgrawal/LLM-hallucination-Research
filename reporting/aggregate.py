@@ -175,17 +175,25 @@ def failures(runs: List[RunData]) -> pd.DataFrame:
 def reduction_table(runs: List[RunData]) -> pd.DataFrame:
     """Every reduction answer of every run, with the scores computed in this
     environment plus those added by detectors in other environments
-    (reduction_scores.csv), joined on run, question, model and condition."""
+    (reduction_scores.csv), joined on run, question, model and condition.
+
+    Score files are grouped by environment (the folder holding run_01,
+    run_02, …) and each environment is merged once. MiniCheck's and SummaC's
+    files share the same keys, so pooling them before the merge would keep
+    only one environment's columns."""
     frame = concat([r.reduction for r in runs])
-    extra = concat([r.reduction_scores for r in runs])
     if frame.empty:
         return frame
-    if not extra.empty:
-        keys = ["run", "sample_id", "model", "condition"]
-        extra = extra.drop(columns=[c for c in ("error",) if c in extra.columns])
-        extra = extra.drop_duplicates(subset=keys)
-        new_cols = [c for c in extra.columns if c not in frame.columns or c in keys]
-        frame = frame.merge(extra[new_cols], on=keys, how="left")
+    keys = ["run", "sample_id", "model", "condition"]
+    by_env: Dict[Path, list] = {}
+    for r in runs:
+        if r.reduction_scores is not None and not r.reduction_scores.empty:
+            by_env.setdefault(r.folder.parent, []).append(r.reduction_scores)
+    for env, frames in sorted(by_env.items()):
+        extra = pd.concat(frames, ignore_index=True)
+        new_cols = [c for c in extra.columns if c not in frame.columns and c != "error"]
+        if new_cols:
+            frame = frame.merge(extra[keys + new_cols].drop_duplicates(subset=keys), on=keys, how="left")
     return frame
 
 

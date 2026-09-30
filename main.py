@@ -63,10 +63,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--device", choices=("cpu", "cuda"),
-        help="Override device for every torch-based detector (selfcheckgpt nli/bertscore, "
-             "summac, alignscore). Ignored by selfcheckgpt's default ngram method, which "
-             "needs no GPU. Ollama itself always uses the GPU on its own machine if present "
-             "— this flag does not affect Ollama.",
+        help="Device for the torch-based detectors: SelfCheckGPT (BERTScore, NLI), UQLM "
+             "(NLI, BERTScore, embeddings, best-response), SummaC, AlignScore. MiniCheck picks "
+             "the GPU itself when one is present. Ollama always uses its own GPU; this flag "
+             "does not affect it.",
     )
     parser.add_argument(
         "--score-reduction-from",
@@ -99,9 +99,12 @@ def load_config(path: str) -> dict:
 
 
 def apply_plan(config: dict, args: argparse.Namespace) -> dict:
-    """Resolve the run plan: command-line flag > setting in its own config
-    section > `run:` block. Writes the resolved values back into the
-    sections the code reads, and returns the plan that is printed and saved."""
+    """Resolve the run plan. Precedence:
+      detectors, reduce, runs     flag > `run:` block
+      questions per dataset       flag > the dataset's own max_samples > run.samples_per_dataset
+      samples, Self-Refine rounds flag > their own section > `run:` block
+    Writes the resolved values back into the sections the code reads, and
+    returns the plan that is printed and saved."""
     plan = config.setdefault("run", {})
     detectors_cfg = config["detectors"]
     if args.output:
@@ -129,10 +132,10 @@ def apply_plan(config: dict, args: argparse.Namespace) -> dict:
     red.setdefault("max_iterations", plan.get("reduction_iterations", 3))
     # Reduction needs generators, which only the sampling-based detectors bring.
     red["enabled"] = (any(n in selected for n in SAMPLING_DETECTORS) and not args.no_reduce
-                      and bool(args.reduce or plan.get("reduce", False) or red.get("enabled")))
+                      and bool(args.reduce or plan.get("reduce", False)))
 
     if args.device:
-        for name in ("selfcheckgpt", "summac", "alignscore"):
+        for name in ("selfcheckgpt", "uqlm", "summac", "alignscore"):
             detectors_cfg[name]["device"] = args.device
 
     resolved = {
@@ -172,29 +175,39 @@ def print_table(frame: pd.DataFrame) -> None:
 
 def summarise(raw: pd.DataFrame, runner) -> pd.DataFrame:
     """Metrics per score column: per model for generator-dependent
-    detectors, once per case for the others."""
+    detectors, once per case for the others. A detector (or a detector for
+    one model) that failed on every case still gets a row with n_cases 0 and
+    no metrics, so nothing can silently disappear from the results."""
     from benchmark import DetectorValidator
 
     thresholds = runner.thresholds()
-    per_model = [c for c in runner.generator_columns() if c in raw.columns and raw[c].notna().any()]
-    shared = [c for c in thresholds if c not in runner.generator_columns()
-              and c in raw.columns and raw[c].notna().any()]
+    gen_cols = [c for c in runner.generator_columns() if c in raw.columns]
+    shared = [c for c in thresholds if c not in runner.generator_columns() and c in raw.columns]
     has_model_column = "model" in raw.columns and raw["model"].notna().any()
+
+    def failed_row(column, model, n):
+        return pd.DataFrame([{"detector": column.removesuffix("_score"), "model": model,
+                              "n_cases": 0, "n_failed": int(n), "threshold": thresholds[column]}])
+
     frames = []
-    if per_model and has_model_column:
+    if gen_cols and has_model_column:
         for model_name, group in raw.groupby("model", sort=False):
-            usable = [c for c in per_model if group[c].notna().any()]
+            usable = [c for c in gen_cols if group[c].notna().any()]
             if usable:
                 part = DetectorValidator().evaluate_frame(group, usable, {c: thresholds[c] for c in usable})
                 part["model"] = model_name
                 frames.append(part)
+            frames += [failed_row(c, model_name, len(group)) for c in gen_cols if c not in usable]
     # Generator-independent scores repeat on every model's rows in `raw`;
     # de-duplicate by case before scoring them once.
     if shared:
         dedup = raw.drop_duplicates(subset="case_id") if has_model_column else raw
-        part = DetectorValidator().evaluate_frame(dedup, shared, {c: thresholds[c] for c in shared})
-        part["model"] = MODEL_INDEPENDENT
-        frames.append(part)
+        usable = [c for c in shared if dedup[c].notna().any()]
+        if usable:
+            part = DetectorValidator().evaluate_frame(dedup, usable, {c: thresholds[c] for c in usable})
+            part["model"] = MODEL_INDEPENDENT
+            frames.append(part)
+        frames += [failed_row(c, MODEL_INDEPENDENT, len(dedup)) for c in shared if c not in usable]
     if not frames:
         return pd.DataFrame()
     summary = pd.concat(frames, ignore_index=True)
@@ -265,14 +278,14 @@ def run_once(run_dir: Path, run_label: str, config: dict, runner, datasets, gene
     stage_seconds["detector_validation"] = time.monotonic() - stage_start
 
     summary = summarise(raw, runner)
-    if summary.empty:
-        raise SystemExit(f"All enabled detectors failed in {run_label}; see run.log")
+    if summary.empty or not (summary["n_cases"] > 0).any():
+        raise SystemExit(f"All enabled detectors failed on every case in {run_label}; see run.log")
     summary.to_csv(run_dir / "detector_validation_summary.csv", index=False)
     console.section(f"{run_label} · Detector validation results")
     shown = summary.rename(columns={"average_precision": "auprc", "roc_auc": "auroc"})
     shown["model"] = shown["model"].replace(MODEL_INDEPENDENT, "—")
-    print_table(shown[["detector", "model", "n_cases", "n_failed", "auroc", "auprc",
-                       "accuracy", "precision", "recall", "f1", "threshold"]])
+    print_table(shown.reindex(columns=["detector", "model", "n_cases", "n_failed", "auroc", "auprc",
+                                       "accuracy", "precision", "recall", "f1", "threshold"]))
     console.line("auroc/auprc are threshold-free; the other columns use the threshold shown.")
 
     if reduce_on:
@@ -332,6 +345,13 @@ def main() -> None:
     config = load_config(args.config)
     plan = apply_plan(config, args)
     output_dir = Path(config["benchmark"].get("output_dir", "results/current"))
+    old_runs = sorted(output_dir.glob("run_[0-9]*")) if output_dir.is_dir() else []
+    if old_runs and not (args.dry_run or args.preflight):
+        raise SystemExit(
+            f"{output_dir} already holds results ({', '.join(p.name for p in old_runs)}). "
+            "Choose a new --output (or move the old folder): mixing runs would make the "
+            "combined report wrong."
+        )
     log_file = None if args.dry_run else output_dir / "run.log"
     console.setup_logging(config.get("logging", {}).get("level", "INFO"), log_file)
     logger.debug("Command: {}", " ".join(sys.argv))
@@ -427,8 +447,8 @@ def main() -> None:
         generators = ModelFactory.build_all(config)
         if not generators:
             raise SystemExit(
-                "SelfCheckGPT needs at least one reachable generator. Configure "
-                "remote Ollama or an OpenAI-compatible endpoint."
+                "The sampling-based detectors need at least one generator model: start "
+                "Ollama (`ollama serve`) and check selected_models in the config."
             )
         for g in generators:
             extras = [x for x in (getattr(g, "parameter_size", None),

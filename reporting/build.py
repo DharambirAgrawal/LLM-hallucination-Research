@@ -34,7 +34,7 @@ STATUS = ("Engineering results, not reportable research evidence yet: thresholds
           "run-to-run std, and no human review (see docs/REPRODUCIBILITY.md).")
 DETECTOR_SOURCES = {
     "selfcheckgpt": "SelfCheckGPT, official package (Manakul et al., 2023)",
-    "uqlm": "UQLM, official package (Bouchard & Chauhan, 2025)",
+    "uqlm": "UQLM, official package (Bouchard et al., 2025)",
     "uqlm_judge": "UQLM LLM-as-a-judge, official package",
     "minicheck": "MiniCheck, official package (Tang et al., 2024)",
     "summac": "SummaC, official package (Laban et al., 2022)",

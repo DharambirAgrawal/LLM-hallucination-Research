@@ -6,7 +6,7 @@ schema_version: 1
 sources:
   selfcheckgpt:
     kind: detector
-    status: source-verified-runtime-validation-pending
+    status: official-package-integrated-runtime-verified
     paper: https://arxiv.org/abs/2303.08896
     repository: https://github.com/potsawee/selfcheckgpt
     revision: 19b492a2a380931bf1ed0ca94a9565c9aa7b03e1
@@ -53,7 +53,7 @@ sources:
     integration: official-package
     local_adapter: detectors/summac_detector.py
     runtime: isolated-legacy-environment
-    notes: Prefer SummaC-Conv for paper-aligned comparison; install Torch separately.
+    notes: SummaC-Conv (vitc) is used; its trained weights are downloaded from the pinned commit and SHA-256 checked. Runs in its own venv (requirements/summac.txt).
 
   alignscore:
     kind: detector
@@ -82,7 +82,7 @@ sources:
     integration: official-git-dependency
     local_adapter: detectors/minicheck_detector.py
     runtime: evaluator-machine
-    notes: Strong grounded fact-checking candidate; model artifacts must be pinned separately before use.
+    notes: Runs in its own venv (requirements/minicheck.txt). Its Hugging Face weights are loaded by the package itself; the revision used is recorded in each run_manifest.json.
 
   self_refine:
     kind: reducer
@@ -102,8 +102,8 @@ sources:
       for this harness's grounded-QA setting, not copied from the upstream
       repository. Report results from this adapter as a LOCAL INSPIRED
       BASELINE, per docs/REPRODUCIBILITY.md Stage C, never as "Self-Refine"
-      without that qualification. Scored with the same frozen SelfCheckGPT
-      detector configured for Stage A; see benchmark/reduction_runner.py.
+      without that qualification. Scored by every enabled detector, like every
+      other reduction method; see benchmark/reduction_runner.py.
 
   self_rag:
     kind: reducer
@@ -148,7 +148,7 @@ sources:
 
   aws_hallucination_labs:
     kind: reference-implementation
-    status: planned-cloud-baseline
+    status: reference-only-not-used
     repository: https://github.com/aws-samples/responsible_ai_reduce_hallucinations_for_genai_apps
     revision: 13067872d3ecc8f294da99c9d28b5f0d36abb68b
     license: Apache-2.0-with-restricted-example-datasets
@@ -159,7 +159,7 @@ sources:
 
   openai_guardrails:
     kind: api-detector
-    status: planned-cloud-baseline
+    status: reference-only-not-used
     repository: https://github.com/openai/openai-guardrails-python
     revision: ede106bb083eb33d4d4c39e461d953a788e84168
     license: MIT
@@ -182,15 +182,15 @@ sources:
 
   true_benchmark:
     kind: dataset-and-meta-evaluation
-    status: planned
+    status: reference-only-not-used
     paper: https://arxiv.org/abs/2204.04991
     repository: https://github.com/google-research/true
     revision: f36230f271c218dd1aac35c70bbd6aafffdbd41f
     license: Apache-2.0
     integration: official-data-and-evaluation
-    local_adapter: benchmark/detector_validation.py
+    local_adapter: null
     runtime: data-preparation-machine
-    notes: Use labeled grounding/generated-text pairs for detector validation and threshold tuning.
+    notes: Not used; its datasets must be collected from many separate original sources.
 
   halubench:
     kind: dataset

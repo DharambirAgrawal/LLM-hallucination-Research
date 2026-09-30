@@ -63,17 +63,21 @@ flowchart LR
 
     subgraph B["Stage B · do the methods reduce hallucination?"]
         base["Baseline answer<br/>(with context)"]
-        meth["Same question, each method:<br/>closed-book · greedy · Self-Refine ·<br/>Chain-of-Verification · UQLM best answer"]
+        own["Answered from scratch:<br/>closed-book · greedy"]
+        fix["Starting from the baseline:<br/>Self-Refine · Chain-of-Verification ·<br/>UQLM best answer"]
         det2["The same detectors score<br/>every answer"]
         delta["Change vs. baseline on the same question<br/>(lower risk = better)"]
-        base --> meth --> det2 --> delta
+        base --> fix --> det2
+        own --> det2
         base --> det2
+        det2 --> delta
     end
 
     q --> lab --> det1
     q --> gen --> det1
     gen --> det2
     q --> base
+    q --> own
 ```
 
 The samples a model draws for a question are drawn **once** and shared by
@@ -191,9 +195,8 @@ in [`docs/HOW_TO_RUN.md`](docs/HOW_TO_RUN.md). In short:
 
 ```bash
 pip install -r requirements.txt       # the one install; Ollama itself is a system install
-python main.py --detectors selfcheckgpt --reduce \
-  --runs 2 --max-samples 2 --n-samples 2 --max-iterations 1 \
-  --output results/smoke-test         # smoke test: same outputs as the full run
+python scripts/run_full.py --runs 2 --max-samples 2 --n-samples 2 --max-iterations 1 \
+  --output results/smoke-test         # smoke test: every environment, tiny numbers
 python scripts/run_full.py            # the full run: config.yaml's `run:` block
 ```
 

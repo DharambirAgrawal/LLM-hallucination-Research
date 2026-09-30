@@ -154,14 +154,20 @@ class ReductionRunner:
         uqlm_best_response picked FROM the samples would otherwise be scored
         against evidence that contains itself (a perfect match, biasing it
         towards low risk), so it is scored leave-one-out: against the other
-        candidates (the baseline + the remaining samples), the same number of
-        pieces of evidence as every other condition."""
+        candidates (the baseline + the samples) minus every exact copy of the
+        picked answer. Its evidence can therefore be smaller than the other
+        conditions' (the number of copies removed)."""
         details = item.get("details") or {}
         index = details.get("chosen_index")
         if cond != "uqlm_best_response" or not index:
             return self.runner.score_answer(case, model)
         samples = self.runner.bank.get(model, case["question"], case["context"])
-        others = [answers["baseline"]["answer"], *[s for i, s in enumerate(samples) if i != index - 1]]
+        chosen = case["answer"]
+        # UQLM prefers the most repeated answer, so the pick often has exact
+        # copies among the samples; every copy is removed, not just one.
+        others = [a for a in [answers["baseline"]["answer"], *samples] if a != chosen]
+        if not others:
+            raise ValueError("no evidence left after removing the picked answer's copies")
         with self.runner.bank.evidence(model, case["question"], case["context"], others):
             return self.runner.score_answer(case, model)
 

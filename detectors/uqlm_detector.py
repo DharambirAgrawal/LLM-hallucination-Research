@@ -1,7 +1,7 @@
 """Adapters around UQLM (CVS Health), Apache-2.0.
 
 Upstream: https://github.com/cvs-health/uqlm (version pinned in
-requirements.txt and provenance/sources.yaml). Paper: Bouchard & Chauhan,
+requirements.txt and provenance/sources.yaml). Paper: Bouchard et al.,
 "UQLM: A Python Package for Uncertainty Quantification in Large Language
 Models", arXiv:2507.06196.
 
