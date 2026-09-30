@@ -201,14 +201,15 @@ in [`docs/HOW_TO_RUN.md`](docs/HOW_TO_RUN.md). In short:
 
 ```bash
 pip install -r requirements.txt       # the one install; Ollama itself is a system install
-python scripts/run_full.py --runs 2 --max-samples 2 --n-samples 2 --max-iterations 1 \
-  --output results/smoke-test         # smoke test: every environment, tiny numbers
-python scripts/run_full.py            # the full run: config.yaml's `run:` block
+python scripts/run_full.py --smoke    # smoke test: the whole experiment with tiny numbers
+python scripts/run_full.py --runs 5   # the full experiment: 5 independent runs
 ```
 
-How big a run is (runs, samples per dataset, detectors, SelfCheckGPT
-samples, reduction rounds) is set in one place: the `run:` block at the top
-of [`config.yaml`](config.yaml).
+The result folder has one complete folder per run (`run_01/`, `run_02/`, …,
+each with its own report and data) and a `combined/` folder with all runs
+together. How big a run is (runs, questions per dataset, detectors, samples,
+reduction rounds) is set in one place: the `run:` block at the top of
+[`config.yaml`](config.yaml).
 
 Offline tests (no LLM, no downloads) check adapter contracts, metrics,
 reports, downloads/checksums, provenance and documentation links:

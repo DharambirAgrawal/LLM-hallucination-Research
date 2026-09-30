@@ -50,15 +50,16 @@ flowchart TD
     p1 -->|any environment fails| stop(["Stop before any long run,<br/>with the reason per environment"])
     p1 -->|all pass| core
 
-    subgraph P2["Phase 2 · the runs"]
-        core["core (requirements.txt)<br/>SelfCheckGPT · UQLM · UQLM judge<br/>Stage A + Stage B (produces the reduction answers)"]
-        mc["minicheck (.venv-minicheck)<br/>Stage A + scores core's reduction answers"]
-        su["summac (.venv-summac)<br/>Stage A + scores core's reduction answers"]
-        al["alignscore (.venv-alignscore, opt-in)<br/>Stage A + scores core's reduction answers"]
+    subgraph P2["Phase 2 · the runs (each group fills run_01 … run_N)"]
+        core["core (requirements.txt)<br/>SelfCheckGPT · UQLM · UQLM judge<br/>Stage A + Stage B → run_XX/core/"]
+        mc["minicheck (.venv-minicheck)<br/>Stage A + scores core's answers → run_XX/minicheck/"]
+        su["summac (.venv-summac)<br/>Stage A + scores core's answers → run_XX/summac/"]
+        al["alignscore (.venv-alignscore, opt-in)<br/>→ run_XX/alignscore/"]
         core --> mc --> su --> al
     end
 
-    al --> comb["combined/<br/>every detector · every run · mean ± std"]
+    al --> perrun["run_01/ … run_N/<br/>one report per run, every detector"]
+    perrun --> comb["combined/<br/>every run · mean ± std · consistency"]
 ```
 
 `core` runs first because the other environments score the answers it
@@ -162,21 +163,19 @@ Two details keep this comparison fair:
 ## 6. What a results folder contains
 
 ```text
-<output>/
-  run_01/ … run_N/        one complete, independent run each
-    detector_validation_raw.csv      every labeled answer × every detector
-    detector_validation_summary.csv  metrics per detector (per model where relevant)
-    reduction_comparison.csv         every method's answer × every detector (core)
-    reduction_scores.csv             another environment's scores of those answers
-    selfcheckgpt_samples.jsonl       every sampled answer used as evidence
-    run_manifest.json · config_used.yaml · environment.txt
+results/<name>/
+  run_01/ … run_N/         one complete, independent run each (same data, every detector, every method)
     report.docx · report.html · REPORT.md · takeaways.md · charts/ · tables/
-  combined/                mean ± std over runs: the same reports + all rows
-  run.log                  full log with tracebacks
+    core/                  detector_validation_raw.csv · detector_validation_summary.csv
+                           reduction_comparison.csv (every method's answer × every core detector)
+                           selfcheckgpt_samples.jsonl · run_manifest.json · config_used.yaml · environment.txt
+    minicheck/ summac/     the same Stage A files + reduction_scores.csv (their scores of core's answers)
+  combined/                all runs together: mean ± std, consistency, the same reports + all rows
+  logs/                    one log per detector group
 ```
 
-`scripts/run_full.py` puts one such folder per environment (`core/`,
-`minicheck/`, …) and adds a top-level `combined/` over all of them.
+`main.py` on its own (one environment) writes `run_XX/` directly, without the
+group subfolders, plus the same `combined/`.
 
 ## 7. Design rules
 

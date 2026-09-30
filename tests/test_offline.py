@@ -701,6 +701,50 @@ class RunIntegrityTests(unittest.TestCase):
             for name in ("REPORT.md", "report.html", "report.docx", "takeaways.md", "raw_all_runs.csv"):
                 self.assertTrue((root / "combined" / name).is_file(), name)
 
+    def test_run_full_layout_one_folder_per_run_plus_combined(self):
+        """results/<name>/run_XX/<group>/ → each run's report covers every
+        group; combined/ covers every run."""
+        import pandas as pd
+        from reporting import generate
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for run in ("run_01", "run_02"):
+                core, mini = root / run / "core", root / run / "minicheck"
+                core.mkdir(parents=True)
+                mini.mkdir(parents=True)
+                self._write_run(core, {"selfcheckgpt": {"enabled": True, "method": "ngram",
+                                                        "n_samples": 2, "threshold": 3.0}},
+                                [ReplayModel(["Python was released in 1991."])])
+                self._write_run(mini, {"minicheck": {"enabled": True}})
+                rows = [{"sample_id": f"q{i}", "dataset": "synthetic", "model": "replay",
+                         "question": "When?", "condition": cond, "answer": "a",
+                         "selfcheckgpt_ngram_score": 1.0 + (0.5 if cond == "closed_book" else 0) + i / 10}
+                        for i in range(12) for cond in ("baseline", "closed_book")]
+                pd.DataFrame(rows).to_csv(core / "reduction_comparison.csv", index=False)
+                pd.DataFrame([{"sample_id": r["sample_id"], "model": "replay", "condition": r["condition"],
+                               "minicheck_score": 0.2 + (0.3 if r["condition"] == "closed_book" else 0)}
+                              for r in rows]).to_csv(mini / "reduction_scores.csv", index=False)
+            for run in ("run_01", "run_02"):
+                generate(root / run)
+                ranking = pd.read_csv(root / run / "tables" / "detector_ranking.csv")
+                self.assertEqual(sorted(ranking["detector"]), ["MiniCheck", "SelfCheckGPT n-gram"])
+                for name in ("report.docx", "report.html", "REPORT.md", "takeaways.md"):
+                    self.assertTrue((root / run / name).is_file(), f"{run}/{name}")
+            generate(root, out_dir=root / "combined")
+            ms = pd.read_csv(root / "combined" / "tables" / "summary_mean_std.csv")
+            self.assertTrue((ms["n_runs"] == 2).all())
+            both = pd.read_csv(root / "combined" / "reduction_all_runs.csv")
+            self.assertTrue(both["minicheck_score"].notna().all())   # joined from the other group
+            self.assertEqual(sorted(both["run"].unique()), ["run_01", "run_02"])
+
+    def test_smoke_fills_only_missing_numbers(self):
+        import argparse
+        import main
+        args = argparse.Namespace(smoke=True, runs=None, max_samples=5, n_samples=None, max_iterations=None)
+        main.apply_smoke(args)
+        self.assertEqual((args.runs, args.max_samples, args.n_samples, args.max_iterations), (2, 5, 2, 1))
+
     def test_reduction_scores_from_every_environment_are_kept(self):
         """MiniCheck's and SummaC's reduction_scores.csv share the same keys;
         both environments' columns must survive the merge, for every run."""

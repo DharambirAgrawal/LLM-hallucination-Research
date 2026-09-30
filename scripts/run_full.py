@@ -1,36 +1,33 @@
 #!/usr/bin/env python3
-"""Orchestrate a "full run": every detector group in its own environment,
-plus the reduction stage, collected into one output folder with one
-combined report.
+"""The full experiment: N independent runs with every detector and every
+reduction method, then one combined result.
 
-Environments (run in this order):
-  core        requirements.txt: SelfCheckGPT + UQLM + the UQLM judge. They
-              share the generator samples, and this environment also runs
-              the reduction stage.
-  minicheck   requirements/minicheck.txt   } each pins conflicting torch /
-  summac      requirements/summac.txt      } transformers versions upstream,
-  alignscore  requirements/alignscore.txt  } so each gets its own venv; each
-              also scores core's reduction answers (--score-reduction-from).
+    python scripts/run_full.py                 # the config.yaml plan (run: block)
+    python scripts/run_full.py --runs 5        # 5 independent runs
+    python scripts/run_full.py --smoke         # quick end-to-end test (tiny numbers)
 
-Two phases. Phase 1 installs every environment, downloads everything, and
-runs each environment's preflight (`main.py --preflight`: one real question
-through the whole pipeline). Phase 2, the long runs, starts only if every
-environment passed, so a broken install or missing model shows up in the
-first minutes, not after hours of another environment's run.
+Result folder:
 
-Run this with the controller environment's Python (docs/HOW_TO_RUN.md §0.3).
-core runs directly in that environment when requirements.txt is installed
-there; every other environment gets its own `.venv-<name>`, created on first
-use and reinstalled automatically if its requirements file changed or a
-previous install did not finish. pip output goes to `<output>/logs/`.
+    results/<name>/
+      run_01/ … run_N/   each a complete, independent run on the same data:
+                         every detector, every reduction method, its own
+                         report.docx / report.html / REPORT.md and data files
+      combined/          all runs together: mean ± std, run-to-run
+                         consistency, one report
+      logs/              one log per detector group, pip install logs
 
-The full run: exactly the `run:` block of config.yaml
+Why detector groups: MiniCheck, SummaC and AlignScore pin conflicting
+torch/transformers versions upstream, so each runs in its own Python
+environment (created and reused automatically as `.venv-<name>`).
+SelfCheckGPT, UQLM and the judge share the generator samples and run in the
+"core" environment (requirements.txt), which also runs the reduction methods;
+the other groups then score those reduction answers too. Each group writes
+its part of every run into run_XX/<group>/, and this script builds each
+run's report and the combined report from all of them.
 
-    python scripts/run_full.py
-
-A small smoke version of it (same outputs, less data):
-
-    python scripts/run_full.py --runs 2 --max-samples 2 --n-samples 2 --max-iterations 1
+Two phases. Phase 1 installs every environment, downloads everything and
+runs each group's preflight (one real question through the whole pipeline).
+Phase 2, the long runs, starts only if every group passed.
 """
 from __future__ import annotations
 
@@ -38,6 +35,7 @@ import argparse
 import hashlib
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -48,16 +46,15 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from utils import console  # noqa: E402
 
-# Environments, in run order. "core" holds the sampling-based detectors and
-# the judge (they share the generator samples) and runs the reduction stage;
-# the others each hold one detector with conflicting dependencies and score
-# core's reduction answers too. Data, checkpoints and models are fetched by
-# main.py; sizes come from config.yaml's `run:` block.
+# Detector groups, in run order. "python" lists interpreters to build the
+# venv with when the current one is too new for the package's pins.
 ENVIRONMENTS = {
     "core": {"requirements": "requirements.txt", "detectors": ("selfcheckgpt", "uqlm", "uqlm_judge")},
     "minicheck": {"requirements": "requirements/minicheck.txt", "detectors": ("minicheck",)},
     "summac": {"requirements": "requirements/summac.txt", "detectors": ("summac",)},
-    "alignscore": {"requirements": "requirements/alignscore.txt", "detectors": ("alignscore",)},
+    # AlignScore pins torch<2, which has no wheels for Python ≥ 3.12.
+    "alignscore": {"requirements": "requirements/alignscore.txt", "detectors": ("alignscore",),
+                   "python": ("python3.11", "python3.10", "python3.9")},
 }
 ALL_DETECTORS = tuple(d for env in ENVIRONMENTS.values() for d in env["detectors"])
 MARKER = ".requirements.sha256"
@@ -67,31 +64,21 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
+    parser.add_argument("--runs", type=int, help="Independent runs (default: run.runs in config.yaml)")
+    parser.add_argument("--smoke", action="store_true",
+                        help="Quick end-to-end test: 2 runs, 2 questions per dataset, 2 samples, "
+                             "1 refine round (explicit flags still win)")
+    parser.add_argument("--output", help="Result folder (default: results/<run|smoke>-<timestamp>)")
     parser.add_argument("--config", default="config.yaml")
-    parser.add_argument(
-        "--output",
-        help="Combined output folder (default: results/full-run-<timestamp>)",
-    )
-    parser.add_argument("--runs", type=int, help="Independent repeats (default: run.runs)")
-    parser.add_argument("--max-samples", type=int,
-                        help="Samples per dataset (default: run.samples_per_dataset)")
-    parser.add_argument("--n-samples", type=int,
-                        help="SelfCheckGPT samples per question (default: run.selfcheckgpt_samples)")
-    parser.add_argument("--max-iterations", type=int,
-                        help="Reduction rounds (default: run.reduction_iterations)")
-    parser.add_argument("--no-reduce", action="store_true", help="Skip the reduction stage")
-    parser.add_argument(
-        "--device", choices=("auto", "cpu", "cuda"),
-        help="Device for the torch-based detectors (passed to main.py --device)",
-    )
-    parser.add_argument(
-        "--detectors", nargs="+", choices=ALL_DETECTORS,
-        help="Detectors to run (default: run.detectors in the config)",
-    )
-    parser.add_argument(
-        "--skip-report", action="store_true",
-        help="Only run the environments; skip the top-level combined report",
-    )
+    parser.add_argument("--detectors", nargs="+", choices=ALL_DETECTORS,
+                        help="Detectors to run (default: run.detectors in config.yaml)")
+    parser.add_argument("--max-samples", type=int, help="Questions per dataset (default: config)")
+    parser.add_argument("--n-samples", type=int, help="Samples per question per model (default: config)")
+    parser.add_argument("--max-iterations", type=int, help="Self-Refine rounds (default: config)")
+    parser.add_argument("--no-reduce", action="store_true", help="Skip the reduction methods")
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda"),
+                        help="Device for the torch-based detectors (default: auto)")
+    parser.add_argument("--skip-report", action="store_true", help="Do not build the reports")
     return parser.parse_args()
 
 
@@ -109,6 +96,22 @@ def requirements_hash(requirements: str) -> str:
     return digest.hexdigest()
 
 
+def base_python(name: str) -> str:
+    """The interpreter to build `name`'s venv with."""
+    wanted = ENVIRONMENTS[name].get("python")
+    if not wanted:
+        return sys.executable
+    for candidate in wanted:
+        found = shutil.which(candidate)
+        if found:
+            return found
+    raise RuntimeError(
+        f"{name} needs one of {', '.join(wanted)} (its pinned packages do not support "
+        f"Python {sys.version_info.major}.{sys.version_info.minor}); install one, e.g. "
+        f"`sudo apt install python3.11 python3.11-venv`, or leave {name} out of run.detectors"
+    )
+
+
 def ensure_python(name: str, requirements: str, log_dir: Path) -> Path:
     """Return the interpreter that runs `name`, installing its venv if needed."""
     if name == "core" and all(importlib.util.find_spec(m) for m in ("selfcheckgpt", "uqlm")):
@@ -124,6 +127,7 @@ def ensure_python(name: str, requirements: str, log_dir: Path) -> Path:
         console.line(f"environment      {venv_dir.name} (up to date)")
         return python
 
+    creator = base_python(name)
     log = log_dir / f"pip-{name}.log"
     reason = "first use" if not python.exists() else "requirements changed or last install incomplete"
     console.line(f"environment      installing {venv_dir.name} from {requirements} ({reason})")
@@ -131,7 +135,7 @@ def ensure_python(name: str, requirements: str, log_dir: Path) -> Path:
     started = time.monotonic()
     with log.open("w", encoding="utf-8") as handle:
         if not python.exists():
-            subprocess.run([sys.executable, "-m", "venv", str(venv_dir)],
+            subprocess.run([creator, "-m", "venv", str(venv_dir)],
                            check=True, stdout=handle, stderr=subprocess.STDOUT)
         subprocess.run([str(python), "-m", "pip", "install", "--upgrade", "pip"],
                        check=True, stdout=handle, stderr=subprocess.STDOUT, cwd=ROOT)
@@ -145,135 +149,132 @@ def ensure_python(name: str, requirements: str, log_dir: Path) -> Path:
 def main() -> None:
     args = parse_args()
     started = time.monotonic()
-    # Absolute: main.py runs with cwd=ROOT, so a relative path would split
-    # the output between two places.
-    output_dir = (
-        Path(args.output).resolve() if args.output
-        else ROOT / "results" / f"full-run-{datetime.now():%Y%m%d-%H%M%S}"
-    )
-    old_runs = sorted(output_dir.glob("*/run_[0-9]*")) if output_dir.is_dir() else []
-    if old_runs:
-        raise SystemExit(
-            f"{output_dir} already holds results ({', '.join(str(p.relative_to(output_dir)) for p in old_runs[:4])}"
-            f"{' …' if len(old_runs) > 4 else ''}). Choose a new --output (or move the old folder): "
-            "mixing runs would make the combined report wrong."
-        )
-    log_dir = output_dir / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
 
     import yaml
     config = yaml.safe_load((ROOT / args.config).read_text()) or {}
     plan = config.get("run", {})
-    plan = config.get("run", {})
-    selected = args.detectors or plan.get("detectors") or list(ALL_DETECTORS)
-    envs = {name: [d for d in env["detectors"] if d in selected] for name, env in ENVIRONMENTS.items()}
-    envs = {name: dets for name, dets in envs.items() if dets}
-    args.detectors = list(envs)             # environments, in run order
+    if args.smoke:
+        args.runs = args.runs if args.runs is not None else 2
     runs = args.runs if args.runs is not None else plan.get("runs", 1)
+    selected = args.detectors or plan.get("detectors") or list(ALL_DETECTORS)
+    groups = {name: [d for d in env["detectors"] if d in selected] for name, env in ENVIRONMENTS.items()}
+    groups = {name: dets for name, dets in groups.items() if dets}
     reduce_on = not args.no_reduce and plan.get("reduce", False) and \
-        any(d in envs.get("core", []) for d in ("selfcheckgpt", "uqlm"))
-    console.header("Full run · each detector group in its own environment")
-    console.kv("config", f"{args.config} (run plan below; flags override it)")
-    console.kv("runs", f"{runs} per environment → <env>/run_01 … + combined/")
-    for name, dets in envs.items():
-        console.kv(f"env {name}", ", ".join(dets))
-    console.kv("questions", f"{args.max_samples or plan.get('samples_per_dataset')} per dataset")
-    console.kv("samples", f"{args.n_samples or plan.get('selfcheckgpt_samples')} per question per model")
-    console.kv("reduction", "off" if not reduce_on else
-               ", ".join(config.get("reduction", {}).get("methods", [])) + " vs. baseline (in core; "
-               "every other environment also scores these answers)")
+        any(d in groups.get("core", []) for d in ("selfcheckgpt", "uqlm"))
+
+    # Absolute: main.py runs with cwd=ROOT.
+    stamp = f"{'smoke' if args.smoke else 'run'}-{datetime.now():%Y%m%d-%H%M%S}"
+    output_dir = Path(args.output).resolve() if args.output else ROOT / "results" / stamp
+    old = sorted(output_dir.glob("run_[0-9]*")) if output_dir.is_dir() else []
+    if old:
+        raise SystemExit(f"{output_dir} already holds results ({', '.join(p.name for p in old)}). "
+                         "Choose a new --output: mixing runs would make the combined result wrong.")
+    log_dir = output_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    console.header("Full experiment" + (" · smoke test" if args.smoke else ""))
+    console.kv("runs", f"{runs} independent runs on the same data → run_01 … run_{runs:02d} + combined/")
+    console.kv("detectors", ", ".join(d for dets in groups.values() for d in dets))
+    console.kv("reduction", ", ".join(config.get("reduction", {}).get("methods", [])) + " vs. baseline"
+               if reduce_on else "off")
+    console.kv("config", f"{args.config}" + (" + smoke numbers" if args.smoke else ""))
     console.kv("output", output_dir)
 
     def main_args(name: str) -> list[str]:
-        cmd_args = ["--config", args.config, "--detectors", *envs[name],
-                    "--output", str(output_dir / name)]
-        if name != "core" and reduce_on and core_ok:
-            cmd_args += ["--score-reduction-from", str(output_dir / "core")]
-        for flag, value in (("--runs", args.runs), ("--max-samples", args.max_samples),
-                            ("--n-samples", args.n_samples), ("--max-iterations", args.max_iterations),
-                            ("--device", args.device)):
+        cmd = ["--config", args.config, "--detectors", *groups[name],
+               "--output", str(output_dir), "--part", name, "--runs", str(runs)]
+        if args.smoke:
+            cmd.append("--smoke")
+        for flag, value in (("--max-samples", args.max_samples), ("--n-samples", args.n_samples),
+                            ("--max-iterations", args.max_iterations), ("--device", args.device)):
             if value is not None:
-                cmd_args += [flag, str(value)]
+                cmd += [flag, str(value)]
         if args.no_reduce:
-            cmd_args.append("--no-reduce")
-        return cmd_args
+            cmd.append("--no-reduce")
+        return cmd
 
-    core_ok = True   # set False if core fails in phase 2: nothing to score then
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
-    total = len(args.detectors)
+    total = len(groups)
 
-    # Phase 1: install every environment, download everything, and run each
-    # detector's preflight (one real case through the whole pipeline).
-    # Nothing long starts unless every detector passes.
-    console.header("Phase 1/2 · Prepare and check every detector before the long runs")
+    # Phase 1: install every environment, download everything, preflight.
+    console.header("Phase 1/2 · Prepare and check every detector group before the long runs")
     pythons: dict[str, Path] = {}
     problems = []
-    for index, name in enumerate(args.detectors, 1):
-        console.section(f"[{index}/{total}] {name}")
+    for index, name in enumerate(groups, 1):
+        console.section(f"[{index}/{total}] {name}: {', '.join(groups[name])}")
         try:
             pythons[name] = ensure_python(name, ENVIRONMENTS[name]["requirements"], log_dir)
-        except subprocess.CalledProcessError:
-            problems.append((name, f"install failed — see {log_dir / f'pip-{name}.log'}"))
+        except (subprocess.CalledProcessError, RuntimeError) as exc:
+            reason = (str(exc) if isinstance(exc, RuntimeError)
+                      else f"install failed — see {log_dir / f'pip-{name}.log'}")
+            console.line(f"✗ {reason}")
+            problems.append((name, reason))
             continue
-        preflight_args = [a for a in main_args(name)]
-        if "--score-reduction-from" in preflight_args:   # its answers do not exist yet
-            i = preflight_args.index("--score-reduction-from")
-            del preflight_args[i:i + 2]
-        code = subprocess.run(
-            [str(pythons[name]), "main.py", *preflight_args, "--preflight"],
-            cwd=ROOT, env=env,
-        ).returncode
+        code = subprocess.run([str(pythons[name]), "main.py", *main_args(name), "--preflight"],
+                              cwd=ROOT, env=env).returncode
         if code != 0:
-            problems.append((name, f"preflight failed — see {output_dir / name / 'run.log'}"))
+            problems.append((name, f"preflight failed — see {log_dir / f'{name}.log'}"))
 
     if problems:
         console.header("Stopped before the long runs")
         for name, reason in problems:
-            console.line(f"✗ {name:<14} {reason}")
+            console.line(f"✗ {name:<11} {reason}")
         console.line()
         console.line("Nothing long was started. Fix the items above and run the same command again;")
         console.line("installed environments and downloads are reused.")
         raise SystemExit(1)
 
-    # Phase 2: the real runs. Everything was just verified.
-    console.header("Phase 2/2 · Runs (all detectors passed their checks)")
-    results = []  # (name, status, seconds)
-    for index, name in enumerate(args.detectors, 1):
-        print(f"\n\n{'#' * console.WIDTH}\n#  [{index}/{total}] {name}\n{'#' * console.WIDTH}",
+    # Phase 2: the runs. core first: the other groups score its reduction answers.
+    console.header("Phase 2/2 · Runs (every detector group passed its checks)")
+    results = []
+    core_ok = True
+    for index, name in enumerate(groups, 1):
+        print(f"\n\n{'#' * console.WIDTH}\n#  [{index}/{total}] {name}: all {runs} runs\n{'#' * console.WIDTH}",
               file=sys.stderr, flush=True)
-        detector_started = time.monotonic()
-        code = subprocess.run([str(pythons[name]), "main.py", *main_args(name)],
-                              cwd=ROOT, env=env).returncode
-        seconds = time.monotonic() - detector_started
+        cmd = main_args(name)
+        if name != "core" and reduce_on and core_ok:
+            cmd += ["--score-reduction-from", str(output_dir)]
+        group_started = time.monotonic()
+        code = subprocess.run([str(pythons[name]), "main.py", *cmd], cwd=ROOT, env=env).returncode
+        seconds = time.monotonic() - group_started
         if code == 0:
             results.append((name, "ok", seconds))
         else:
-            results.append((name, f"failed (exit {code}) — see {output_dir / name / 'run.log'}", seconds))
+            results.append((name, f"failed (exit {code}) — see {log_dir / f'{name}.log'}", seconds))
             if name == "core" and reduce_on:
                 core_ok = False
-                console.line("⚠ core failed: the other environments run Stage A only "
+                console.line("⚠ core failed: the other groups run Stage A only "
                              "(there are no reduction answers to score)")
 
-    ran = [name for name, status, _ in results if status == "ok"]
+    # Reports: one per run (every detector group together), then combined.
     produced = {}
+    ran = [name for name, status, _ in results if status == "ok"]
     if ran and not args.skip_report:
         from reporting import generate
-        console.header("Combined report · every detector, every run")
+        console.header("Reports")
+        for index in range(1, runs + 1):
+            run_dir = output_dir / f"run_{index:02d}"
+            if run_dir.is_dir():
+                try:
+                    generate(run_dir, title=f"{output_dir.name} · {run_dir.name}")
+                    console.line(f"✓ {run_dir.name}/report.docx")
+                except Exception as exc:
+                    console.line(f"✗ {run_dir.name}: report failed: {exc}")
         produced = generate(output_dir, out_dir=output_dir / "combined",
-                            title=f"{output_dir.name} · all detectors")
+                            title=f"{output_dir.name} · combined over {runs} runs")
+        console.line("✓ combined/report.docx")
 
-    console.header(f"Full run finished in {console.duration(time.monotonic() - started)}")
+    console.header(f"Finished in {console.duration(time.monotonic() - started)}")
     for name, status, seconds in results:
-        mark = "✓" if status == "ok" else "✗"
-        console.line(f"{mark} {name:<14} {console.duration(seconds):>9}   {status}")
+        console.line(f"{'✓' if status == 'ok' else '✗'} {name:<11} {console.duration(seconds):>9}   {status}")
     if not ran:
-        raise SystemExit("\nNo detector produced results; nothing to report.")
+        raise SystemExit("\nNo detector group produced results; nothing to report.")
     console.line()
     console.line(f"{output_dir}/")
-    for name in args.detectors:
-        console.line(f"  {name}/run_01 … /combined   {', '.join(envs[name])}: each run + its own report")
-    console.line("  combined/   all detectors, all runs: REPORT.md · report.html · report.docx · "
-                 "takeaways.md   ← start here")
+    for index in range(1, runs + 1):
+        console.line(f"  run_{index:02d}/     complete run: report.docx · report.html · REPORT.md · data")
+    console.line("  combined/   all runs together: report.docx · report.html · takeaways.md   ← start here")
+    console.line("  logs/       one log per detector group")
     if "report (docx)" in produced:
         console.kv("open", produced["report (docx)"])
 

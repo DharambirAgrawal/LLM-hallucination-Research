@@ -38,6 +38,14 @@ def parse_args() -> argparse.Namespace:
         help="Detectors to run (run.detectors)",
     )
     parser.add_argument(
+        "--smoke", action="store_true",
+        help="Quick end-to-end test: 2 runs, 2 questions per dataset, 2 samples, 1 refine round "
+             "(any of these given explicitly still wins)",
+    )
+    parser.add_argument(
+        "--part", help=argparse.SUPPRESS,   # used by scripts/run_full.py: write run_XX/<part>/
+    )
+    parser.add_argument(
         "--runs", type=int,
         help="Independent repeats (run.runs): run_01 … run_N, then combined/ with mean ± std",
     )
@@ -106,6 +114,17 @@ def _resolve_device(device: str) -> str:
         return "cuda" if torch.cuda.is_available() else "cpu"
     except ImportError:
         return "cpu"
+
+
+SMOKE = {"runs": 2, "max_samples": 2, "n_samples": 2, "max_iterations": 1}
+
+
+def apply_smoke(args: argparse.Namespace) -> None:
+    """--smoke fills in the tiny test numbers that were not given explicitly."""
+    if getattr(args, "smoke", False):
+        for key, value in SMOKE.items():
+            if getattr(args, key, None) is None:
+                setattr(args, key, value)
 
 
 def apply_plan(config: dict, args: argparse.Namespace) -> dict:
@@ -270,7 +289,8 @@ def print_plan(plan: dict, config: dict) -> None:
 
 
 def run_once(run_dir: Path, run_label: str, config: dict, runner, datasets, generators,
-             reduce_on: bool, score_reduction_from: Path | None = None) -> dict:
+             reduce_on: bool, score_reduction_from: Path | None = None,
+             run_name: str = "", make_report: bool = True) -> dict:
     """One complete repetition into `run_dir`; returns its stage timings."""
     from benchmark.reduction_runner import ReductionRunner
     from reporting import generate
@@ -308,7 +328,9 @@ def run_once(run_dir: Path, run_label: str, config: dict, runner, datasets, gene
         console.section(f"{run_label} · Reduction results")
         print_reduction(reduction, runner)
     elif score_reduction_from:
-        source = score_reduction_from / run_dir.name / "reduction_comparison.csv"
+        source = score_reduction_from / run_name / "core" / "reduction_comparison.csv"
+        if not source.is_file():   # a single-environment output folder
+            source = score_reduction_from / run_name / "reduction_comparison.csv"
         console.section(f"{run_label} · Stage 2/2 · Scoring the reduction answers of {source.parent}")
         stage_start = time.monotonic()
         score_reduction_answers(source, run_dir / "reduction_scores.csv", runner, datasets)
@@ -317,10 +339,11 @@ def run_once(run_dir: Path, run_label: str, config: dict, runner, datasets, gene
     if runner.generator_columns():
         runner.bank.export(run_dir / "selfcheckgpt_samples.jsonl")
     write_run_files(run_dir, run_config, sys.argv, datasets, generators, started_at, stage_seconds)
-    try:
-        generate(run_dir, title=f"{run_dir.parent.name}/{run_dir.name}")
-    except Exception as exc:
-        logger.opt(exception=exc).error(f"Report for {run_label} failed: {exc}")
+    if make_report:
+        try:
+            generate(run_dir, title=f"{run_dir.parent.name}/{run_dir.name}")
+        except Exception as exc:
+            logger.opt(exception=exc).error(f"Report for {run_label} failed: {exc}")
     return stage_seconds
 
 
@@ -354,16 +377,19 @@ def main() -> None:
     started = time.monotonic()
 
     config = load_config(args.config)
+    apply_smoke(args)
     plan = apply_plan(config, args)
     output_dir = Path(config["benchmark"].get("output_dir", "results/current"))
-    old_runs = sorted(output_dir.glob("run_[0-9]*")) if output_dir.is_dir() else []
+    part = args.part   # set by scripts/run_full.py: this process fills run_XX/<part>/
+    pattern = f"run_[0-9]*/{part}" if part else "run_[0-9]*"
+    old_runs = sorted(output_dir.glob(pattern)) if output_dir.is_dir() else []
     if old_runs and not (args.dry_run or args.preflight):
         raise SystemExit(
-            f"{output_dir} already holds results ({', '.join(p.name for p in old_runs)}). "
+            f"{output_dir} already holds results ({', '.join(str(p.relative_to(output_dir)) for p in old_runs)}). "
             "Choose a new --output (or move the old folder): mixing runs would make the "
             "combined report wrong."
         )
-    log_file = None if args.dry_run else output_dir / "run.log"
+    log_file = None if args.dry_run else (output_dir / "logs" / f"{part}.log" if part else output_dir / "run.log")
     console.setup_logging(config.get("logging", {}).get("level", "INFO"), log_file)
     logger.debug("Command: {}", " ".join(sys.argv))
 
@@ -515,12 +541,19 @@ def main() -> None:
 
     # ── Runs ────────────────────────────────────────────────────────────
     for index in range(1, n_runs + 1):
+        run_name = f"run_{index:02d}"
+        run_dir = output_dir / run_name / part if part else output_dir / run_name
         run_label = f"Run {index}/{n_runs}"
-        console.header(f"{run_label} → {output_dir / f'run_{index:02d}'}")
+        console.header(f"{run_label} → {run_dir}")
         if index > 1:
             runner.bank.reset()  # every run draws its own samples
-        run_once(output_dir / f"run_{index:02d}", run_label, config, runner,
-                 datasets, generators, reduce_on, score_from)
+        run_once(run_dir, run_label, config, runner, datasets, generators, reduce_on, score_from,
+                 run_name=run_name, make_report=not part)
+
+    if part:   # scripts/run_full.py builds each run's report and the combined one
+        console.section(f"Done in {console.duration(time.monotonic() - started)}")
+        console.line(f"{part}: {n_runs} run(s) written to {output_dir}/run_XX/{part}/")
+        return
 
     # ── Combined ────────────────────────────────────────────────────────
     from reporting import generate

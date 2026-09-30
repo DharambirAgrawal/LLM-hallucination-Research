@@ -41,6 +41,7 @@ class RunData:
     reduction_scores: Optional[pd.DataFrame]   # scores from a detector in another venv
     manifest: Optional[dict]
     config: Optional[dict]
+    group: str = ""          # detector group (core, minicheck, …) that produced it
 
 
 def _read_csv(path: Path) -> Optional[pd.DataFrame]:
@@ -53,7 +54,13 @@ def discover(input_dir: Path) -> List[RunData]:
         if "combined" in path.relative_to(input_dir).parts:
             continue
         folder = path.parent
-        run = folder.name if RUN_NAME.match(folder.name) else "run_01"
+        # Layouts: <out>/run_XX/<group>/ (scripts/run_full.py) or <out>/run_XX/ (main.py)
+        if RUN_NAME.match(folder.parent.name):
+            run, group = folder.parent.name, folder.name
+        elif RUN_NAME.match(folder.name):
+            run, group = folder.name, folder.parent.name
+        else:
+            run, group = "run_01", folder.name
         manifest_path = folder / "run_manifest.json"
         config_path = folder / "config_used.yaml"
         runs.append(RunData(
@@ -68,6 +75,7 @@ def discover(input_dir: Path) -> List[RunData]:
                 _read_csv(folder / "reduction_scores.csv")),
             manifest=json.loads(manifest_path.read_text()) if manifest_path.is_file() else None,
             config=yaml.safe_load(config_path.read_text()) if config_path.is_file() else None,
+            group=group,
         ))
     if not runs:
         raise SystemExit(f"No run folder (detector_validation_summary.csv) found under {input_dir}")
@@ -177,18 +185,18 @@ def reduction_table(runs: List[RunData]) -> pd.DataFrame:
     environment plus those added by detectors in other environments
     (reduction_scores.csv), joined on run, question, model and condition.
 
-    Score files are grouped by environment (the folder holding run_01,
-    run_02, …) and each environment is merged once. MiniCheck's and SummaC's
+    Score files are grouped by detector group (minicheck, summac, …) and
+    each group is merged once. MiniCheck's and SummaC's
     files share the same keys, so pooling them before the merge would keep
     only one environment's columns."""
     frame = concat([r.reduction for r in runs])
     if frame.empty:
         return frame
     keys = ["run", "sample_id", "model", "condition"]
-    by_env: Dict[Path, list] = {}
+    by_env: Dict[str, list] = {}
     for r in runs:
         if r.reduction_scores is not None and not r.reduction_scores.empty:
-            by_env.setdefault(r.folder.parent, []).append(r.reduction_scores)
+            by_env.setdefault(r.group or str(r.folder.parent), []).append(r.reduction_scores)
     for env, frames in sorted(by_env.items()):
         extra = pd.concat(frames, ignore_index=True)
         new_cols = [c for c in extra.columns if c not in frame.columns and c != "error"]

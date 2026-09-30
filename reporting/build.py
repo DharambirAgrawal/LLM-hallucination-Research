@@ -730,13 +730,21 @@ def generate(input_dir: Path, out_dir: Optional[Path] = None, title: Optional[st
     report.h2("Data files")
     report.p("Every number in this report comes from these files; the full detail (every answer, every score) "
              "is in them rather than in this document.")
-    files = (["detector_validation_raw.csv: every labeled answer with every detector's score",
-              "reduction_comparison.csv: every method's answer with every detector's score",
-              "selfcheckgpt_samples.jsonl: the samples the sampling-based detectors compared against",
-              "run_manifest.json · config_used.yaml · environment.txt: what exactly ran"]
-             if not combined else
-             ["raw_all_runs.csv: every labeled answer of every run with every score",
-              "reduction_all_runs.csv: every method's answer of every run with every score"])
+    data_notes = {
+        "detector_validation_raw.csv": "every labeled answer with this group's detector scores",
+        "detector_validation_summary.csv": "this group's Stage A metrics",
+        "reduction_comparison.csv": "every method's answer with every core detector's score",
+        "reduction_scores.csv": "this group's scores of the reduction answers",
+        "selfcheckgpt_samples.jsonl": "the samples the sampling-based detectors compared against",
+        "run_manifest.json": "what exactly ran (versions, commit, checksums, model digests)",
+    }
+    if combined:
+        files = ["raw_all_runs.csv: every labeled answer of every run with every score",
+                 "reduction_all_runs.csv: every method's answer of every run with every score",
+                 "run_XX/: each run's own report and data (see its report's Appendix)"]
+    else:
+        files = [f"{(r.folder / name).relative_to(input_dir).as_posix()}: {note}"
+                 for r in runs for name, note in data_notes.items() if (r.folder / name).is_file()]
     files += [f"tables/{p.name}: {TABLE_NOTES.get(p.name, '')}" for p in sorted(tables.glob("*.csv"))]
     report.bullets(files)
 

@@ -152,45 +152,34 @@ run's `config_used.yaml` and in the report.
 
 ## 3. Smoke test first — always
 
-The full run with tiny numbers: **2 runs**, 2 questions per dataset, 2
-samples, 1 refine round, **every environment** (core, MiniCheck, SummaC).
-It produces the same folders and files as the full run:
+The whole experiment with tiny numbers (2 runs, 2 questions per dataset, 2
+samples, 1 Self-Refine round), every detector group, every reduction
+method. It produces exactly the same folders and files as the full run:
 
 ```bash
-python scripts/run_full.py --runs 2 --max-samples 2 --n-samples 2 --max-iterations 1 \
-  --output results/smoke-test
+python scripts/run_full.py --smoke
 ```
 
-(`--max-samples` is questions **per dataset**; `--runs` is the number of
-independent repeats. The output folder must be new: a run refuses a folder
-that already holds results, so old and new runs can never mix.)
+Results go to `results/smoke-<date-time>/` (or pass `--output
+results/<name>`; a folder that already holds runs is refused, so old and new
+runs can never mix).
 
-The same smoke test with **every** detector, including the opt-in AlignScore
-(its ~1.9 GB checkpoint is downloaded on first use), and every reduction
-method:
+To include the opt-in AlignScore too (its ~1.9 GB checkpoint is downloaded
+on first use; it needs Python 3.9–3.11 installed next to your main Python,
+because its pinned `torch<2` does not exist for newer Python; `run_full.py`
+finds it and says what to install if it is missing):
 
 ```bash
-python scripts/run_full.py \
-  --detectors selfcheckgpt uqlm uqlm_judge minicheck summac alignscore \
-  --runs 2 --max-samples 2 --n-samples 2 --max-iterations 1 \
-  --output results/smoke-all
+python scripts/run_full.py --smoke \
+  --detectors selfcheckgpt uqlm uqlm_judge minicheck summac alignscore
 ```
 
-Check: the final table shows ✓ for every environment, the results tables
-show `n_failed` 0 (a few failures for SelfCheckGPT BERTScore on very short
-answers are an upstream limitation, recorded per case; anything else is a
-problem to look at in `run.log`), and
-`results/smoke-test/combined/report.docx` (or `report.html`) opens with its
-tables and charts. If a check fails, the preflight stops the run within
-minutes and the environment's `run.log` has the full traceback.
-
-A quicker check of the core environment alone (no MiniCheck / SummaC, so no
-`reduction_scores.csv`):
-
-```bash
-python main.py --detectors selfcheckgpt uqlm uqlm_judge --reduce \
-  --runs 2 --max-samples 2 --n-samples 2 --max-iterations 1 --output results/smoke-core
-```
+Check: the final table shows ✓ for every detector group, and
+`results/smoke-<date-time>/combined/report.docx` (or `report.html`) opens
+with its summary, charts and tables; each `run_01/`, `run_02/` has its own.
+A few failures for SelfCheckGPT BERTScore on very short answers are an
+upstream limitation, recorded per case; anything else is a problem to look
+at in `logs/`. If a check fails, phase 1 stops the run within minutes.
 
 ## What the terminal shows
 
@@ -216,61 +205,62 @@ python main.py --detectors selfcheckgpt uqlm uqlm_judge --reduce \
 
 Each bar is one model, so `[elapsed<remaining]` is that model's own ETA.
 Only one-line warnings reach the screen; tracebacks, retries and
-third-party warnings go to `run.log`. A model or detector that fails 10
+third-party warnings go to the log (`logs/<group>.log`). A model or detector that fails 10
 cases in a row is stopped early with the reason.
 
 ## 4. Full run
 
 ```bash
-tmux new -s run                  # a multi-hour run should survive a closed terminal
-python scripts/run_full.py       # exactly the `run:` block of config.yaml
+tmux new -s run                        # a multi-hour run should survive a closed terminal
+python scripts/run_full.py             # the run: block of config.yaml (3 runs by default)
+python scripts/run_full.py --runs 5    # or: 5 independent runs
 ```
 
-Why several environments: MiniCheck, SummaC and AlignScore pin conflicting
+Every run is the same experiment on the same data (same questions, same
+detectors, same methods); only the models' own sampling differs, so the
+combined report can show how consistent each result is.
+
+Why detector groups: MiniCheck, SummaC and AlignScore pin conflicting
 `torch`/`transformers` versions upstream, so each gets its own
 `.venv-<name>` (created and reused by `run_full.py`, pip output in
 `<output>/logs/`, reinstalled automatically if its requirements changed).
 SelfCheckGPT, UQLM and the judge share the generator samples and run
-together in the **core** environment, which is `requirements.txt` (§0.3)
-and also runs the reduction stage. The other environments then score the
-core run's reduction answers, so every detector judges every method.
+together in the **core** group, which is `requirements.txt` (§0.3) and also
+runs the reduction methods; the other groups then score those answers too,
+so every detector judges every method. Each group writes its part of every
+run into `run_XX/<group>/`, and `run_full.py` then builds each run's report
+and the combined one from all groups together.
 
 It runs in two phases:
 
-- **Phase 1 · prepare and check**: every environment is installed and its
-  `main.py --preflight` runs (download everything, one real question through
-  the whole pipeline). If any environment fails, the script stops and lists
-  why; nothing long has started. Rerun the same command after fixing it;
+- **Phase 1 · prepare and check**: every group's environment is installed
+  and its preflight runs (download everything, one real question through the
+  whole pipeline). If any group fails, the script stops and lists why;
+  nothing long has started. Rerun the same command after fixing it;
   environments and downloads are reused.
-- **Phase 2 · runs**: only when every environment passed: core first (it
-  produces the reduction answers), then the others, then the top-level
-  combined report.
+- **Phase 2 · runs**: only when every group passed: core first (it produces
+  the reduction answers), then the others, then the reports.
 
-`alignscore` is opt-in: uncomment it in `run.detectors`, or pass all six
-detectors, `--detectors selfcheckgpt uqlm uqlm_judge minicheck summac
-alignscore`. Its legacy environment is heavy and its ~1.9 GB checkpoint is
-downloaded (and checksum-verified) on first use. If one environment fails in
-phase 2, the others still run and its line in the final table shows `✗` with
-the path of its `run.log`.
+`alignscore` is opt-in (see §3). If one group fails in phase 2, the others
+still run and its line in the final table shows `✗` with the path of its log.
 
 ## What a run writes
 
 ```text
-results/full-run-<time>/                       (scripts/run_full.py)
-  combined/                ← start here: all detectors, all runs
-  core/                                        SelfCheckGPT + UQLM + judge + reduction
-    run_01/  run_02/  run_03/                  each a complete, independent run
-    combined/                                  this environment, mean ± std over its runs
-    run.log
-  minicheck/   (same layout; also scores core's reduction answers)
-  summac/      (same layout; also scores core's reduction answers)
-  logs/pip-<env>.log
-
-results/smoke-core/                            (main.py, one environment)
-  run_01/  run_02/  combined/  run.log
+results/<name>/
+  run_01/                  one complete, independent run
+    report.docx · report.html · REPORT.md · takeaways.md · charts/ · tables/
+    core/                  SelfCheckGPT + UQLM + judge data, and every reduction answer
+    minicheck/             MiniCheck's scores (of the labeled answers and the reduction answers)
+    summac/                SummaC's scores (same)
+  run_02/ … run_N/         the same, for every run
+  combined/                ← start here: all runs together (mean ± std, consistency)
+    report.docx · report.html · REPORT.md · takeaways.md · charts/ · tables/
+    raw_all_runs.csv · reduction_all_runs.csv
+  logs/                    core.log · minicheck.log · summac.log · pip-<group>.log
 ```
 
-**Every report folder** (`run_XX/`, `<env>/combined/`, `combined/`) has:
+**Every report folder** (`run_XX/` and `combined/`) has:
 
 | File | What it holds |
 |---|---|
@@ -310,14 +300,14 @@ and adds `tables/*_by_run.csv` (each run's numbers side by side),
 `tables/*_mean_std.csv`, `raw_all_runs.csv` and `reduction_all_runs.csv`
 (every row of every run, with a `run` column).
 
-**Each `run_XX/` folder** also keeps that run's raw data:
+**Each `run_XX/<group>/` folder** keeps that group's raw data for the run:
 
 | File | What it holds |
 |---|---|
 | `detector_validation_summary.csv` | AUROC, AUPRC, accuracy, precision, recall, F1, `n_cases`, `n_failed` per detector (per model for SelfCheckGPT and UQLM) |
 | `detector_validation_raw.csv` | every labeled answer: dataset, question, context, answer, label, every detector's score, errors |
 | `reduction_comparison.csv` | (core) one row per question × model × method: the answer, every detector's score, generation calls, seconds, method details (feedback, verification questions, chosen candidate), `reproduction_status`, errors |
-| `reduction_scores.csv` | (minicheck/summac/alignscore) their scores of core's reduction answers, joined into the reports automatically |
+| `reduction_scores.csv` | (minicheck / summac / alignscore) their scores of core's reduction answers, joined into the reports automatically |
 | `selfcheckgpt_samples.jsonl` | every sampled answer SelfCheckGPT and UQLM compared against (one line per model × question) |
 | `run_manifest.json` | command, start/end time, per-stage seconds, Git commit (+ uncommitted flag), package versions, dataset sha256s, Ollama model digests, Hugging Face model revisions |
 | `config_used.yaml`, `environment.txt` | the resolved config (incl. the run plan) and every installed package version |
@@ -349,7 +339,8 @@ of silently continuing on partial data.
 
 | Flag | `main.py` | `run_full.py` | What it does |
 |---|---|---|---|
-| `--runs N` | ✓ | ✓ | Independent repeats (`run.runs`) |
+| `--smoke` | ✓ | ✓ | Quick test: 2 runs, 2 questions per dataset, 2 samples, 1 refine round |
+| `--runs N` | ✓ | ✓ | Independent runs (`run.runs`) |
 | `--max-samples N` | ✓ | ✓ | Questions per dataset (`run.samples_per_dataset`) |
 | `--n-samples N` | ✓ | ✓ | Samples per question per model (`run.selfcheckgpt_samples`) |
 | `--max-iterations N` | ✓ | ✓ | Self-Refine rounds (`run.reduction_iterations`) |
