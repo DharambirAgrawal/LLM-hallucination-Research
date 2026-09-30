@@ -578,6 +578,26 @@ class ReductionRunnerTests(unittest.TestCase):
         self.assertIn("ngram", result.scores)
         self.assertIn("bertscore", result.errors)
 
+    def test_selfcheck_bertscore_model_is_loaded_once_on_the_configured_device(self):
+        from detectors.selfcheckgpt_detector import _LoadedBERTScore
+        built = []
+
+        class FakeBERTScorer:
+            def __init__(self, lang, rescale_with_baseline, device):
+                built.append((lang, rescale_with_baseline, device))
+
+            def score(self, cands, refs, verbose=False):
+                return ("P", "R", "F1")
+        fake = types.ModuleType("bert_score")
+        fake.BERTScorer = FakeBERTScorer
+        loaded = _LoadedBERTScore("cpu")
+        with patch.dict(sys.modules, {"bert_score": fake}):
+            for _ in range(5):   # upstream calls it once per sample
+                result = loaded.score(["a"], ["b"], lang="en", verbose=False,
+                                      rescale_with_baseline=True)
+        self.assertEqual(result, ("P", "R", "F1"))
+        self.assertEqual(built, [("en", True, "cpu")])
+
     def test_cove_parses_numbered_questions(self):
         from reducers.cove import ChainOfVerificationReducer
         self.assertEqual(ChainOfVerificationReducer.parse_questions("1. Who?\n- When was it?\n\nQ3: Where?"),

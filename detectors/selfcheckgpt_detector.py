@@ -22,6 +22,15 @@ The response is split into sentences with spaCy en_core_web_sm as in the
 upstream README; the response score is the mean of the upstream sentence
 scores (the paper's passage-level average). Upstream values are reported as
 returned, without clipping. Nothing in the scoring is reimplemented here.
+
+One call is routed, not changed: upstream SelfCheckBERTScore calls
+``bert_score.score(...)`` once per sample, which reloads roberta-large from
+disk every time and always puts it on the GPU when one exists (it passes no
+device). With Ollama sharing the GPU that fails intermittently with "CUDA out
+of memory". The module-level ``bert_score`` seen by upstream is replaced by
+``_LoadedBERTScore``: the same library's ``BERTScorer`` with the same
+arguments (lang, rescale_with_baseline; same model, layer, baseline file,
+idf=False, batch size 64), loaded once on the configured device. Same numbers.
 """
 from __future__ import annotations
 
@@ -41,6 +50,24 @@ if TYPE_CHECKING:
     from models.base_model import BaseModel
 
 METHODS = ("ngram", "bertscore", "nli", "prompt")
+
+
+class _LoadedBERTScore:
+    """Stands in for the ``bert_score`` module inside upstream
+    SelfCheckBERTScore: ``score(...)`` with upstream's arguments, served by one
+    ``bert_score.BERTScorer`` per setting, kept loaded on ``device``."""
+
+    def __init__(self, device: Optional[str]):
+        self.device = device
+        self._scorers: Dict[tuple, object] = {}
+
+    def score(self, cands, refs, lang=None, verbose=False, rescale_with_baseline=False):
+        key = (lang, rescale_with_baseline)
+        if key not in self._scorers:
+            from bert_score import BERTScorer
+            self._scorers[key] = BERTScorer(lang=lang, rescale_with_baseline=rescale_with_baseline,
+                                            device=self.device)
+        return self._scorers[key].score(cands, refs, verbose=verbose)
 
 
 @dataclass
@@ -91,6 +118,7 @@ class SelfCheckGPTDetector:
         if self._scorers:
             return
         try:
+            import selfcheckgpt.modeling_selfcheck as upstream
             from selfcheckgpt.modeling_selfcheck import (
                 SelfCheckBERTScore,
                 SelfCheckNLI,
@@ -107,6 +135,7 @@ class SelfCheckGPTDetector:
                     self._scorers[method] = SelfCheckNgram(n=1)
                 elif method == "bertscore":
                     self._scorers[method] = SelfCheckBERTScore(rescale_with_baseline=True)
+                    upstream.bert_score = _LoadedBERTScore(self.device)   # see module docstring
                 elif method == "nli":
                     self._scorers[method] = SelfCheckNLI(device=self.device)
                 elif method == "prompt":

@@ -58,6 +58,13 @@ hallucinated**.
   and raises `IndexError` when none remain (short answers, e.g. HaluEval QA,
   DROP). Each scorer fails on its own; the failure is recorded per case and
   counted per dataset in the report.
+- Upstream `SelfCheckBERTScore` calls `bert_score.score(...)` once per
+  sample, which reloads roberta-large every call and always places it on the
+  GPU (no device is passed). Next to Ollama on the same GPU this caused
+  intermittent "CUDA out of memory". The adapter routes that one call to the
+  same library's `bert_score.BERTScorer`, built with the same arguments (same
+  model, layer, baseline file, idf off, batch size 64) and kept loaded on the
+  configured device. The scoring code and the numbers are unchanged.
 
 ### UQLM (Bouchard et al., 2025)
 
