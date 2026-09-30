@@ -24,7 +24,7 @@ sources:
 
   uqlm:
     kind: detector
-    status: official-package-integrated
+    status: official-package-integrated-runtime-verified
     paper: https://arxiv.org/abs/2507.06196
     repository: https://github.com/cvs-health/uqlm
     revision: 2bb24061717017f021f73b79a0a17604b87dfbfb   # release v0.6.6 (requirements.txt pins uqlm==0.6.6)
@@ -34,7 +34,7 @@ sources:
     runtime: evaluator-machine
     notes: >-
       BlackBoxUQ consistency scorers (semantic_negentropy, noncontradiction,
-      entailment, cosine_sim, exact_match, bert_score) on the fixed answer
+      entailment, cosine_sim, bert_score; exact_match opt-in) on the fixed answer
       and the shared SelfCheckGPT samples, with use_best=False (the default
       True swaps the scored answer for the "best" sample before the
       consistency scorers run; verified in uqlm 0.6.6). LLMJudge with its

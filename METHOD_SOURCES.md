@@ -18,7 +18,7 @@ hallucinated**.
 | Family | Scores | Official source | What we add |
 |---|---|---|---|
 | SelfCheckGPT | `selfcheckgpt_ngram`, `_bertscore`, `_nli`, `_prompt` | [potsawee/selfcheckgpt](https://github.com/potsawee/selfcheckgpt), MIT, pinned commit | adapter: [`detectors/selfcheckgpt_detector.py`](detectors/selfcheckgpt_detector.py) |
-| UQLM consistency | `uqlm_semantic_negentropy`, `_noncontradiction`, `_entailment`, `_cosine_sim`, `_exact_match`, `_bert_score` | [cvs-health/uqlm](https://github.com/cvs-health/uqlm) v0.6.6, Apache-2.0 | adapter: [`detectors/uqlm_detector.py`](detectors/uqlm_detector.py) |
+| UQLM consistency | `uqlm_semantic_negentropy`, `_noncontradiction`, `_entailment`, `_cosine_sim`, `_bert_score` (`_exact_match` opt-in) | [cvs-health/uqlm](https://github.com/cvs-health/uqlm) v0.6.6, Apache-2.0 | adapter: [`detectors/uqlm_detector.py`](detectors/uqlm_detector.py) |
 | UQLM LLM-as-a-judge | `uqlm_judge` | same UQLM release | same adapter |
 | MiniCheck | `minicheck` | [Liyan06/MiniCheck](https://github.com/Liyan06/MiniCheck), Apache-2.0 | [`detectors/minicheck_detector.py`](detectors/minicheck_detector.py) |
 | SummaC | `summac` | [tingofurro/summac](https://github.com/tingofurro/summac), Apache-2.0 | [`detectors/summac_detector.py`](detectors/summac_detector.py) |
@@ -72,9 +72,11 @@ hallucinated**.
   0.6.6: for a hallucinated answer the default reported non-contradiction
   0.67 / entailment 0.50 (numbers of a correct sample); with `use_best=False`
   0.003 / 0.0003.
-- `exact_match` is UQLM's short-answer scorer; on multi-sentence answers it
-  almost never matches. It is kept (official, cheap) and shows up near chance
-  in the results.
+- `exact_match` is UQLM's short-answer scorer (is a sample word-for-word
+  identical to the answer?). It is **not used by default**: in the first real
+  smoke run it gave the same score (1.0) to all 56 answers, i.e. no
+  information, because free-text answers are never repeated verbatim. It can
+  be added back in `detectors.uqlm.scorers` for short-answer datasets.
 - `bert_score` (unrescaled F1, typically 0.8–0.95) and `cosine_sim`
   (`0.5 + cos/2`) give risks that rarely reach 0.5, so their
   threshold-dependent metrics (accuracy, precision, recall, F1) are

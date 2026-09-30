@@ -149,8 +149,10 @@ python scripts/run_full.py --runs 2 --max-samples 2 --n-samples 2 --max-iteratio
 (`--max-samples` is questions **per dataset**; `--runs` is the number of
 independent repeats.)
 
-Check: every results table in the terminal shows `n_failed` 0, the final
-table shows ✓ for every environment, and
+Check: the final table shows ✓ for every environment, the results tables
+show `n_failed` 0 (a few failures for SelfCheckGPT BERTScore on very short
+answers are an upstream limitation, recorded per case; anything else is a
+problem to look at in `run.log`), and
 `results/smoke-test/combined/report.docx` (or `report.html`) opens with its
 tables and charts. If a check fails, the preflight stops the run within
 minutes and the environment's `run.log` has the full traceback.
@@ -249,16 +251,32 @@ results/smoke-core/                            (main.py, one environment)
 | `report.html` | the same report as one self-contained web page (charts embedded) |
 | `REPORT.md` | the same report in Markdown (charts in `charts/`) |
 | `takeaways.md` | just the key findings, in plain sentences |
-| `charts/*.png` | AUROC and AUPRC per detector × model, AUROC per detector × dataset, AUROC in every run (consistency), change vs. baseline per method × detector and per method × model, share of questions improved, seconds per answer |
+| `charts/*.png` | how the experiment works (flow diagram), detectors ranked by AUROC, AUROC per detector × dataset, change in risk per method judged by each validated detector (95% CI), and in the appendix: every detector's view of Stage B and AUROC in every run |
 | `tables/*.csv` | every table in the report |
 
-The report sections: **Run plan** (runs, datasets and sizes, models with
-size/quantization, detectors and their settings, judge, reduction methods,
-seed, code commit, package versions, run time) · **Key takeaways** ·
-**Stage A** detector validation (per detector × model, per dataset with
-failure counts) · **Stage B** reduction (change vs. baseline per method ×
-detector, by model, by dataset, cost, example answers that improved most /
-got worse most) · **Run by run** (combined only) · **Failures** · **Files**.
+The report reads top to bottom as a research report; every chart has a
+"How to read this chart" box and a "What it shows" sentence:
+
+1. **Summary**: the answers in plain sentences (most reliable detector,
+   which detectors are validated, for each method whether it lowered risk,
+   with 95% confidence intervals).
+2. **How the experiment works**: flow diagram, datasets, detectors and
+   methods in one line each.
+3. **Stage A**: detectors ranked by AUROC (chance and validation lines), one
+   compact table, AUROC per dataset and (with several models) per generator
+   model. A detector that gives every answer the same score is flagged as
+   "no signal" and never used as a judge.
+4. **Stage B**: each method's change in risk vs. the baseline answer, judged
+   only by the **validated detectors** (AUROC ≥ 0.65 in Stage A; if none
+   passes, the three best, flagged as indicative), with 95% bootstrap
+   confidence intervals; the same by generator model and by dataset; one
+   example answer per method.
+5. **Reliability**: run-to-run variation, failures by cause.
+6. **Appendix**: exactly what ran (models, versions, commit), Stage B as
+   seen by every detector, AUROC per run, and every data file.
+
+The full detail (every answer, every score, every table) is in the CSV
+files, not in the document.
 
 **A `combined/` folder** reports every metric as mean ± std over the runs,
 and adds `tables/*_by_run.csv` (each run's numbers side by side),
@@ -294,10 +312,11 @@ of silently continuing on partial data.
 
 - **Ollama** uses the machine's GPU automatically if there is one.
 - **Detectors**: SelfCheckGPT (BERTScore, NLI), UQLM, SummaC and AlignScore
-  run torch models. Pass `--device cuda` (to `main.py` or `run_full.py`) on a
-  GPU machine; the default is `cpu`, which works but is much slower.
-  MiniCheck uses the GPU by itself when one is present. SelfCheckGPT's
-  n-gram and prompt scorers need no GPU.
+  run torch models. The config default `device: "auto"` uses the GPU when
+  torch sees one and the CPU otherwise; `--device cpu|cuda` (to `main.py` or
+  `run_full.py`) forces one. The device used is printed in the Detectors
+  section. MiniCheck uses the GPU by itself when one is present.
+  SelfCheckGPT's n-gram and prompt scorers need no GPU.
 
 ## Useful flags
 
@@ -310,7 +329,7 @@ of silently continuing on partial data.
 | `--detectors …` | ✓ | ✓ | Which detectors run (`run.detectors`) |
 | `--no-reduce` | ✓ | ✓ | Skip the reduction stage (`run.reduce`) |
 | `--reduce` | ✓ | | Force the reduction stage on |
-| `--device cpu\|cuda` | ✓ | ✓ | Device for the torch-based detectors |
+| `--device auto\|cpu\|cuda` | ✓ | ✓ | Device for the torch-based detectors (default `auto`: GPU if present) |
 | `--output DIR` | ✓ | ✓ | Where results are written |
 | `--config FILE` | ✓ | ✓ | Another config file (default `config.yaml`) |
 | `--preflight` | ✓ | | Download everything, check the pipeline on one question, print the estimate, stop |
@@ -326,13 +345,19 @@ Which models run and which datasets are enabled come from `config.yaml`
 - **Stage A** tells you how well each detector separates faithful from
   hallucinated answers on labeled data (AUROC/AUPRC need no threshold; the
   other metrics use uncalibrated thresholds).
-- **Stage B** tells you, per method, how each detector's risk score changes
-  compared with the model's own baseline answer to the same question. Every
-  row says what the method is in `reproduction_status` (official
+- **Stage B** tells you, per method, how the risk score of each validated
+  detector changes compared with the model's own baseline answer to the same
+  question. Repeated runs of one question × model are averaged first, so each
+  pair counts once; the 95% confidence interval is a percentile bootstrap
+  over those pairs (2,000 resamples, fixed seed), given only when there are
+  at least 10 pairs. A method is reported as
+  "lower risk" only when the whole interval is below zero. Every row of the
+  CSVs says what the method is in `reproduction_status` (official
   implementation, local implementation of a paper, local inspired
   adaptation, ablation, or decoding setting); see
   [`METHOD_SOURCES.md`](../METHOD_SOURCES.md).
 
-Neither is publishable evidence on its own yet: there is no held-out
-calibration split, no confidence intervals beyond run-to-run std, and no
-human review (see [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md)).
+Neither is publishable evidence on its own yet: detector thresholds are not
+calibrated on a held-out split, the validation bar is a fixed choice, small
+runs give wide intervals, and there is no human review (see
+[`REPRODUCIBILITY.md`](REPRODUCIBILITY.md)).

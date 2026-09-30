@@ -80,10 +80,16 @@ flowchart LR
     q --> own
 ```
 
+Every detector scores every answer, but the report judges the reduction
+methods only with the detectors that **passed Stage A** (AUROC ≥ 0.65), and
+gives each method's change in risk with a 95% confidence interval.
+
 The samples a model draws for a question are drawn **once** and shared by
 every sampling-based detector, by every known answer to that question, and
-by every reduction method's answer, so all comparisons use identical
-evidence.
+by every reduction method's answer, so the comparisons use identical
+evidence. (The one exception: when the UQLM best-response method picks one
+of the samples, that answer is scored without its own copies; see
+[`METHOD_SOURCES.md`](METHOD_SOURCES.md#reduction-stage-b).)
 
 ## Research objective
 
@@ -102,7 +108,7 @@ flowchart LR
     ans["Answer to check"]
     subgraph S["Compare with the model's own samples"]
         sc["SelfCheckGPT<br/>n-gram · BERTScore · NLI · LLM prompt"]
-        uq["UQLM consistency<br/>semantic entropy · NLI · cosine ·<br/>exact match · BERTScore"]
+        uq["UQLM consistency<br/>semantic entropy · NLI · cosine ·<br/>BERTScore"]
     end
     subgraph C["Compare with the context"]
         jd["UQLM LLM-as-a-judge<br/>(separate judge model)"]
@@ -128,7 +134,7 @@ setting chosen and why: [`METHOD_SOURCES.md`](METHOD_SOURCES.md).
 | Method | What it measures | Paper | Code | License |
 |---|---|---|---|---|
 | **SelfCheckGPT** (n-gram, BERTScore, NLI, LLM prompt) | Consistency of an answer with other answers the same model gives to the same prompt | [Manakul et al., 2023](https://aclanthology.org/2023.emnlp-main.557/) | [potsawee/selfcheckgpt](https://github.com/potsawee/selfcheckgpt) | MIT |
-| **UQLM** consistency (semantic entropy, non-contradiction, entailment, cosine, exact match, BERTScore) | Agreement between the answer and the model's sampled answers | [Bouchard et al., 2025](https://arxiv.org/abs/2507.06196); semantic entropy: [Farquhar et al., 2024](https://doi.org/10.1038/s41586-024-07421-0) | [cvs-health/uqlm](https://github.com/cvs-health/uqlm) | Apache-2.0 |
+| **UQLM** consistency (semantic entropy, non-contradiction, entailment, cosine, BERTScore) | Agreement between the answer and the model's sampled answers | [Bouchard et al., 2025](https://arxiv.org/abs/2507.06196); semantic entropy: [Farquhar et al., 2024](https://doi.org/10.1038/s41586-024-07421-0) | [cvs-health/uqlm](https://github.com/cvs-health/uqlm) | Apache-2.0 |
 | **UQLM LLM-as-a-judge** | A separate judge model grades the answer against the context | [Bouchard et al., 2025](https://arxiv.org/abs/2507.06196) | [cvs-health/uqlm](https://github.com/cvs-health/uqlm) | Apache-2.0 |
 | **MiniCheck** | Sentence-level support from the grounding document | [Tang et al., 2024](https://aclanthology.org/2024.emnlp-main.499/) | [Liyan06/MiniCheck](https://github.com/Liyan06/MiniCheck) | Apache-2.0 |
 | **SummaC** | NLI-based document–answer consistency | [Laban et al., 2022](https://aclanthology.org/2022.tacl-1.10/) | [tingofurro/summac](https://github.com/tingofurro/summac) | Apache-2.0 |

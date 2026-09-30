@@ -12,7 +12,8 @@ UQLMConsistencyDetector: the official black-box (consistency) scorers,
       noncontradiction     NLI non-contradiction probability
       entailment           NLI entailment probability
       cosine_sim           sentence-embedding cosine similarity
-      exact_match          share of samples identical to the answer
+      exact_match          share of samples identical to the answer (short
+                           answers only; not used by default, see config.yaml)
       bert_score           BERTScore F1
     `use_best=False` is required: with UQLM's default (True) the answer is
     replaced by the "best" sample BEFORE the consistency and similarity
@@ -40,6 +41,7 @@ from models.prompts import grounded_prompt
 
 CONSISTENCY_SCORERS = ("semantic_negentropy", "noncontradiction", "entailment",
                        "cosine_sim", "exact_match", "bert_score")
+DEFAULT_SCORERS = ("semantic_negentropy", "noncontradiction", "entailment", "cosine_sim", "bert_score")
 
 
 class UQLMConsistencyDetector:
@@ -99,12 +101,18 @@ class UQLMJudgeDetector:
             raise RuntimeError("UQLM / langchain-ollama not installed: pip install -r requirements.txt") from exc
         llm = ChatOllama(model=self.judge_model, base_url=self.host, temperature=0)
         self._judge = LLMJudge(llm=llm, scoring_template=self.scoring_template)
+        self._loop = asyncio.new_event_loop()
 
     def score_many(self, questions: List[str], contexts: List[str], answers: List[str]) -> List[float]:
         self._load()
         prompts = [grounded_prompt(q, c) for q, c in zip(questions, contexts)]
         with contextlib.redirect_stdout(io.StringIO()):
-            result = asyncio.run(self._judge.judge_responses(prompts=prompts, responses=answers))
+            # One event loop for the judge's lifetime: asyncio.run() would close
+            # its loop after each call, while ChatOllama's HTTP client stays
+            # bound to it, so every call after the first failed with
+            # "Event loop is closed" (found in the first real smoke run).
+            result = self._loop.run_until_complete(
+                self._judge.judge_responses(prompts=prompts, responses=answers))
         scores = []
         for value in result["scores"]:
             if value is None or value != value:  # NaN: judge output could not be parsed

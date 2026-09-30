@@ -62,11 +62,11 @@ def parse_args() -> argparse.Namespace:
         help="Max feedback → refine rounds (run.reduction_iterations)",
     )
     parser.add_argument(
-        "--device", choices=("cpu", "cuda"),
+        "--device", choices=("auto", "cpu", "cuda"),
         help="Device for the torch-based detectors: SelfCheckGPT (BERTScore, NLI), UQLM "
-             "(NLI, BERTScore, embeddings, best-response), SummaC, AlignScore. MiniCheck picks "
-             "the GPU itself when one is present. Ollama always uses its own GPU; this flag "
-             "does not affect it.",
+             "(NLI, BERTScore, embeddings, best-response), SummaC, AlignScore. Default "
+             "`auto` (config): the GPU when one is present, else the CPU. MiniCheck picks "
+             "the GPU itself. Ollama uses its own GPU; this flag does not affect it.",
     )
     parser.add_argument(
         "--score-reduction-from",
@@ -96,6 +96,16 @@ def load_config(path: str) -> dict:
     config.setdefault("detectors", {})
     config.setdefault("reduction", {})
     return config
+
+
+def _resolve_device(device: str) -> str:
+    if device != "auto":
+        return device
+    try:
+        import torch
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except ImportError:
+        return "cpu"
 
 
 def apply_plan(config: dict, args: argparse.Namespace) -> dict:
@@ -134,9 +144,10 @@ def apply_plan(config: dict, args: argparse.Namespace) -> dict:
     red["enabled"] = (any(n in selected for n in SAMPLING_DETECTORS) and not args.no_reduce
                       and bool(args.reduce or plan.get("reduce", False)))
 
-    if args.device:
-        for name in ("selfcheckgpt", "uqlm", "summac", "alignscore"):
-            detectors_cfg[name]["device"] = args.device
+    # "auto" (the config default): the GPU when torch sees one, else the CPU
+    for name in ("selfcheckgpt", "uqlm", "summac", "alignscore"):
+        wanted = args.device or detectors_cfg[name].get("device", "auto")
+        detectors_cfg[name]["device"] = _resolve_device(wanted)
 
     resolved = {
         "runs": max(1, int(args.runs if args.runs is not None else plan.get("runs", 1))),
@@ -155,10 +166,10 @@ def apply_plan(config: dict, args: argparse.Namespace) -> dict:
 def describe_detector(name: str, cfg: dict, judge: dict) -> str:
     if name == "selfcheckgpt":
         methods = cfg.get("methods") or [cfg.get("method", "ngram")]
-        text = f"{', '.join(methods)} · temperature={cfg.get('temperature', 1.0)}"
+        text = f"{', '.join(methods)} · temperature={cfg.get('temperature', 1.0)} · device={cfg.get('device')}"
         return text + (f" · prompt judge={judge.get('model')}" if "prompt" in methods else "")
     if name == "uqlm":
-        return ", ".join(cfg.get("scorers") or ["default scorers"])
+        return ", ".join(cfg.get("scorers") or ["default scorers"]) + f" · device={cfg.get('device')}"
     if name == "uqlm_judge":
         return f"judge={judge.get('model')} · template={cfg.get('template', 'true_false_uncertain')}"
     parts = [f"model={cfg.get('model_name', 'default')}", f"threshold={cfg.get('threshold', 0.5)}"]

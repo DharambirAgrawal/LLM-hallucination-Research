@@ -81,7 +81,7 @@ def parse_args() -> argparse.Namespace:
                         help="Reduction rounds (default: run.reduction_iterations)")
     parser.add_argument("--no-reduce", action="store_true", help="Skip the reduction stage")
     parser.add_argument(
-        "--device", choices=("cpu", "cuda"),
+        "--device", choices=("auto", "cpu", "cuda"),
         help="Device for the torch-based detectors (passed to main.py --device)",
     )
     parser.add_argument(
@@ -151,12 +151,19 @@ def main() -> None:
         Path(args.output).resolve() if args.output
         else ROOT / "results" / f"full-run-{datetime.now():%Y%m%d-%H%M%S}"
     )
+    old_runs = sorted(output_dir.glob("*/run_[0-9]*")) if output_dir.is_dir() else []
+    if old_runs:
+        raise SystemExit(
+            f"{output_dir} already holds results ({', '.join(str(p.relative_to(output_dir)) for p in old_runs[:4])}"
+            f"{' …' if len(old_runs) > 4 else ''}). Choose a new --output (or move the old folder): "
+            "mixing runs would make the combined report wrong."
+        )
     log_dir = output_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
     import yaml
-    plan = (yaml.safe_load((ROOT / args.config).read_text()) or {}).get("run", {})
     config = yaml.safe_load((ROOT / args.config).read_text()) or {}
+    plan = config.get("run", {})
     plan = config.get("run", {})
     selected = args.detectors or plan.get("detectors") or list(ALL_DETECTORS)
     envs = {name: [d for d in env["detectors"] if d in selected] for name, env in ENVIRONMENTS.items()}

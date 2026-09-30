@@ -6,7 +6,9 @@ samples depend only on (generator, question, context), never on the answer
 being checked, so they are drawn once and reused: by every sampling-based
 detector, for every labeled answer to that question (Stage A), and for every
 reduction condition's answer (Stage B). Paired comparisons are therefore made
-against identical evidence. Every sample set is exported to JSONL.
+against identical evidence (except a uqlm_best_response pick, which is scored
+leave-one-out; see benchmark/reduction_runner.py). Every sample set is
+exported to JSONL.
 """
 from __future__ import annotations
 

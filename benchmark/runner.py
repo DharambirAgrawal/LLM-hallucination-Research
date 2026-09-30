@@ -6,7 +6,7 @@ hallucinated in every column):
   needs a generator (uses the shared samples, scored once per model):
     selfcheckgpt   selfcheckgpt_<ngram|bertscore|nli|prompt>
     uqlm           uqlm_<semantic_negentropy|noncontradiction|entailment|
-                         cosine_sim|exact_match|bert_score>
+                         cosine_sim|bert_score>  (exact_match opt-in)
   generator-independent (scored once per case, reused by later runs):
     uqlm_judge     uqlm_judge
     minicheck      minicheck
@@ -111,8 +111,8 @@ class BenchmarkRunner:
 
         cfg = cfgs.get("uqlm", {})
         if cfg.get("enabled", False):
-            from detectors.uqlm_detector import CONSISTENCY_SCORERS, UQLMConsistencyDetector
-            scorers = cfg.get("scorers") or list(CONSISTENCY_SCORERS)
+            from detectors.uqlm_detector import DEFAULT_SCORERS, UQLMConsistencyDetector
+            scorers = cfg.get("scorers") or list(DEFAULT_SCORERS)
             detector = UQLMConsistencyDetector(self.bank, scorers, cfg.get("device"))
             self.detectors["uqlm"] = detector
             self.families["uqlm"] = Family(

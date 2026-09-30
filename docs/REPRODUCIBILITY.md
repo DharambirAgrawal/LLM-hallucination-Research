@@ -89,7 +89,8 @@ provider baselines, not as open-source algorithm reproductions.
 
 Keep dependency groups separate:
 
-- `requirements.txt`: the one install (controller + pinned SelfCheckGPT);
+- `requirements.txt`: the one install, the "core" environment (controller +
+  pinned SelfCheckGPT + UQLM and its judge);
 - `requirements/<detector>.txt`: one pinned official method per isolated
   environment (MiniCheck, SummaC, AlignScore), installed by `scripts/run_full.py`;
 - `environment.txt` in every run folder records every installed version.

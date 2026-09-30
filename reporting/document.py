@@ -29,7 +29,7 @@ def fmt_value(value: object) -> str:
 
 @dataclass
 class Block:
-    kind: str                 # h1 | h2 | h3 | p | bullets | table | figure
+    kind: str                 # h1 | h2 | h3 | p | note | bullets | table | figure
     text: str = ""
     items: List[str] = field(default_factory=list)
     frame: pd.DataFrame | None = None
@@ -54,6 +54,10 @@ class Report:
 
     def p(self, text: str) -> None:
         self.blocks.append(Block("p", text))
+
+    def note(self, title: str, text: str) -> None:
+        """A shaded box, e.g. "How to read this chart"."""
+        self.blocks.append(Block("note", text=text, items=[title]))
 
     def bullets(self, items: List[str]) -> None:
         if items:
@@ -84,6 +88,8 @@ class Report:
                 lines += [f"#### {b.text}", ""]
             elif b.kind == "p":
                 lines += [b.text, ""]
+            elif b.kind == "note":
+                lines += [f"> **{b.items[0]}** {b.text}", ""]
             elif b.kind == "bullets":
                 lines += [f"- {item}" for item in b.items] + [""]
             elif b.kind == "table":
@@ -112,6 +118,7 @@ class Report:
             "h1{border-bottom:2px solid #d0d7de;padding-bottom:6px}"
             "h2{margin-top:36px;border-bottom:1px solid #d0d7de;padding-bottom:4px}",
             ".sub{color:#57606a}.tbl{overflow-x:auto;margin:8px 0 16px}",
+            ".note{background:#f1f8ff;border-left:4px solid #0969da;padding:8px 12px;margin:8px 0 16px}",
             "table{border-collapse:collapse;font-size:13px}th,td{border:1px solid #d0d7de;"
             "padding:4px 8px;text-align:left;vertical-align:top}th{background:#f6f8fa}"
             "td.n{text-align:right;font-variant-numeric:tabular-nums}",
@@ -128,6 +135,8 @@ class Report:
                 parts.append(f"<h{level}>{e(b.text)}</h{level}>")
             elif b.kind == "p":
                 parts.append(f"<p>{e(b.text)}</p>")
+            elif b.kind == "note":
+                parts.append(f"<div class='note'><b>{e(b.items[0])}</b> {e(b.text)}</div>")
             elif b.kind == "bullets":
                 parts.append("<ul>" + "".join(f"<li>{e(i)}</li>" for i in b.items) + "</ul>")
             elif b.kind == "table":
@@ -173,6 +182,13 @@ class Report:
                 doc.add_heading(b.text, level={"h1": 1, "h2": 2, "h3": 3}[b.kind])
             elif b.kind == "p":
                 doc.add_paragraph(b.text)
+            elif b.kind == "note":
+                para = doc.add_paragraph()
+                para.paragraph_format.left_indent = Inches(0.3)
+                head = para.add_run(b.items[0] + " ")
+                head.bold = True
+                body = para.add_run(b.text)
+                body.italic = True
             elif b.kind == "bullets":
                 for item in b.items:
                     doc.add_paragraph(item, style="List Bullet")

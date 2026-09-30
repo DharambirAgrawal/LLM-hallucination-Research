@@ -185,13 +185,16 @@ detectors:
     methods: ["ngram", "bertscore", "nli", "prompt"]   # all official SelfCheckGPT scorers
     thresholds: {ngram: 3.0, bertscore: 0.5, nli: 0.5, prompt: 0.5}   # ngram is unbounded
     temperature: 1.0      # sampling temperature (paper setting)
-    device: "cpu"         # bertscore / nli models; --device cuda on a GPU machine
+    device: "auto"        # bertscore / nli models: the GPU when present, else the CPU
 
   uqlm:
     scorers: ["semantic_negentropy", "noncontradiction", "entailment",
-              "cosine_sim", "exact_match", "bert_score"]
+              "cosine_sim", "bert_score"]
+    # exact_match is left out: it asks whether a sample is word-for-word identical
+    # to the answer, which never happens with free-text answers (the first real
+    # smoke run gave it the same score on all 56 answers: no information).
     threshold: 0.5        # on risk = 1 − UQLM confidence
-    device: "cpu"
+    device: "auto"
 
   uqlm_judge:
     template: "true_false_uncertain"   # UQLM's default judge template
@@ -199,7 +202,7 @@ detectors:
 
   summac:
     threshold: 0.5
-    device: "cpu"
+    device: "auto"
     model_name: "vitc"
 
   minicheck:
@@ -210,7 +213,7 @@ detectors:
   alignscore:
     threshold: 0.5
     checkpoint_path: "external_models/alignscore/AlignScore-base.ckpt"
-    device: "cpu"
+    device: "auto"
     model_name: "roberta-base"
 
 # Stage B. Every method answers the same questions; each is compared with the

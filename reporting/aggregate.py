@@ -222,21 +222,9 @@ def reduction_by_run(deltas: pd.DataFrame, keys: List[str]) -> pd.DataFrame:
     if deltas.empty:
         return pd.DataFrame()
     grouped = deltas.groupby(["run", *keys], sort=False)["delta"]
-    out = grouped.agg(n_questions="count", mean_delta="mean").reset_index()
+    out = grouped.agg(n_pairs="count", mean_delta="mean").reset_index()   # (question, model) pairs
     out["better"] = grouped.apply(lambda s: float((s < 0).mean())).to_numpy()
     out["worse"] = grouped.apply(lambda s: float((s > 0).mean())).to_numpy()
-    return out
-
-
-def condition_costs(frame: pd.DataFrame) -> pd.DataFrame:
-    """Per run, model and condition: generation calls and seconds per answer,
-    and the share of answers that failed to be produced."""
-    if frame.empty:
-        return pd.DataFrame()
-    grouped = frame.groupby(["run", "model", "condition"], sort=False)
-    out = grouped.agg(n_answers=("answer", "count"), calls_per_answer=("n_calls", "mean"),
-                      seconds_per_answer=("latency_seconds", "mean")).reset_index()
-    out["failed"] = grouped["answer"].apply(lambda s: float(s.isna().mean())).to_numpy()
     return out
 
 
@@ -258,6 +246,57 @@ def reduction_examples(frame: pd.DataFrame, deltas: pd.DataFrame, detector: str,
                              "baseline answer": cut(answers.get((r.run, r.sample_id, r.model, "baseline"))),
                              "method answer": cut(answers.get((r.run, r.sample_id, r.model, cond)))})
     return pd.DataFrame(rows)
+
+
+def per_unit(deltas: pd.DataFrame) -> pd.DataFrame:
+    """One paired change per (question, model): repeated runs of the same
+    question and model are averaged first, so the unit of analysis is the
+    question × model pair, not the run (runs of one pair are not
+    independent)."""
+    if deltas.empty:
+        return deltas
+    return (deltas.groupby(["condition", "detector", "sample_id", "model", "dataset"], sort=False)["delta"]
+            .mean().reset_index())
+
+
+MIN_PAIRS_FOR_CI = 10   # below this a bootstrap interval is not meaningful
+
+
+def bootstrap_ci(values, n_resamples: int = 2000, seed: int = 0, level: float = 0.95):
+    """Percentile bootstrap confidence interval of the mean (seeded). With
+    fewer than MIN_PAIRS_FOR_CI values no interval is given (NaN): resampling
+    a handful of values produces intervals that look precise but are not."""
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    if len(values) < MIN_PAIRS_FOR_CI:
+        return (np.nan, np.nan)
+    rng = np.random.default_rng(seed)
+    means = rng.choice(values, size=(n_resamples, len(values)), replace=True).mean(axis=1)
+    tail = (1 - level) / 2
+    return float(np.quantile(means, tail)), float(np.quantile(means, 1 - tail))
+
+
+def method_effects(units: pd.DataFrame, detectors: List[str], by: Optional[str] = None) -> pd.DataFrame:
+    """Per method and detector (and optionally per model or dataset): mean
+    paired change with a 95% bootstrap CI, and the share of question × model
+    pairs that got better / worse."""
+    keys = ["condition", "detector"] + ([by] if by else [])
+    rows = []
+    for key, group in units[units["detector"].isin(detectors)].groupby(keys, sort=False):
+        d = group["delta"].to_numpy(dtype=float)
+        low, high = bootstrap_ci(d)
+        rows.append({**dict(zip(keys, key)), "n_pairs": len(d), "mean_change": float(np.mean(d)),
+                     "ci_low": low, "ci_high": high,
+                     "better": float((d < 0).mean()), "worse": float((d > 0).mean())})
+    return pd.DataFrame(rows)
+
+
+def constant_detectors(raw: pd.DataFrame) -> List[str]:
+    """Detectors that gave every answer the same score: no signal at all."""
+    if raw is None or raw.empty:
+        return []
+    cols = [c for c in raw.columns if c.endswith("_score")]
+    return [c.removesuffix("_score") for c in cols if raw[c].dropna().nunique() == 1]
 
 
 def is_number(value) -> bool:

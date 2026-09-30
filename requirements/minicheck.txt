@@ -2,3 +2,4 @@
 # Pinned to the commit reviewed in provenance/sources.yaml.
 -r base.txt
 minicheck @ git+https://github.com/Liyan06/MiniCheck.git@b58b9fa69acbd1015ec970fa65dd752413a053d2
+accelerate>=0.26.0   # MiniCheck loads with device_map; not declared by the package (found in the first real run)

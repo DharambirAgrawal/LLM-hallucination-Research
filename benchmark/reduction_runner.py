@@ -159,7 +159,10 @@ class ReductionRunner:
         conditions' (the number of copies removed)."""
         details = item.get("details") or {}
         index = details.get("chosen_index")
-        if cond != "uqlm_best_response" or not index:
+        # index 0: the baseline itself was picked, scored like the baseline.
+        # index None (not found verbatim among the candidates) is still
+        # scored without any exact copy of itself, like a picked sample.
+        if cond != "uqlm_best_response" or index == 0:
             return self.runner.score_answer(case, model)
         samples = self.runner.bank.get(model, case["question"], case["context"])
         chosen = case["answer"]
@@ -182,7 +185,8 @@ class ReductionRunner:
             first_error = None
             bar = console.progress(samples, desc=f"{label:<26}", total=len(samples), unit="question")
             for sample in bar:
-                base = {"sample_id": sample.sample_id, "dataset": sample.dataset, "model": model.name}
+                base = {"sample_id": sample.sample_id, "dataset": sample.dataset, "model": model.name,
+                        "question": sample.question}
                 if consecutive >= MAX_CONSECUTIVE_FAILURES:
                     for cond in self.conditions():
                         rows.append({**base, "condition": cond, "reproduction_status": CONDITIONS[cond],

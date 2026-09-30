@@ -69,7 +69,7 @@ onto core's answers by run, question, model and method.
 
 ```mermaid
 flowchart TD
-    a["Resolve the run plan<br/>flags > config section > run: block"] --> b["Setup · utils/resources.py<br/>download missing data + weights (SHA-256 checked),<br/>pull missing Ollama models"]
+    a["Resolve the run plan<br/>flag, then run: block (details in main.apply_plan)"] --> b["Setup · utils/resources.py<br/>download missing data + weights (SHA-256 checked),<br/>pull missing Ollama models"]
     b --> c["Load data · data/datasets.py<br/>seeded subset, same questions every run"]
     c --> d["Build detectors · benchmark/runner.py<br/>and generators · models/model_factory.py"]
     d --> e["Preflight · benchmark/preflight.py<br/>1 real question through everything → time estimate"]
@@ -105,7 +105,7 @@ flowchart LR
     subgraph DEP["Per generator model"]
         bank["SampleBank<br/>5 answers from the model,<br/>drawn once per question"]
         sc["SelfCheckGPT ×4"]
-        uq["UQLM consistency ×6"]
+        uq["UQLM consistency ×5"]
         bank --> sc
         bank --> uq
     end
@@ -146,6 +146,11 @@ sequenceDiagram
     Note over R: report: change vs. baseline on the same<br/>question and model, share better / worse
 ```
 
+The report then judges each method only with the detectors that passed
+Stage A (AUROC ≥ 0.65): the mean change vs. the baseline per question × model
+pair, with a 95% bootstrap confidence interval. Every detector's view is
+still in the appendix and the CSVs.
+
 Two details keep this comparison fair:
 
 - **Same evidence.** Every answer to a question is scored against the same
@@ -181,7 +186,7 @@ Two details keep this comparison fair:
 | Every download pinned and SHA-256 checked | `utils/resources.py` | same data and weights on every machine |
 | Fail fast | `benchmark/preflight.py`, 10-failures-in-a-row stop | find problems in minutes, not hours |
 | Failures are recorded, never scored as 0 | `*_error` columns, `n_failed` | a crash must not look like a result |
-| One sample set per model and question | `detectors/sampling.py` | paired comparisons on identical evidence |
+| One sample set per model and question | `detectors/sampling.py` | paired comparisons on identical evidence (except the leave-one-out case, §5) |
 | One model at a time | `benchmark/runner.py` | Ollama keeps one model loaded |
 | Same outputs for smoke and full runs | `scripts/run_full.py` with small numbers | a smoke test checks every environment the full run uses |
 | Never mix runs | `main.py` refuses an output folder that already holds runs | a combined report must only contain this run's repeats |

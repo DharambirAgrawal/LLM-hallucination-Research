@@ -528,6 +528,10 @@ class ReductionRunnerTests(unittest.TestCase):
             self.assertIn("1991", best["answer"])                  # a sample was picked
             self.assertNotIn(best["answer"], evidence)              # every copy removed, not just one
             self.assertIn("Python was released in 1985.", evidence)  # the baseline joins the evidence
+            # the original samples are back in place after scoring
+            sample = datasets["synthetic"][0]
+            self.assertEqual(runner.bank.get(model, sample.question, sample.context),
+                             ["Python was first released in 1991."] * 2)
 
     def test_one_failing_selfcheck_scorer_keeps_the_others(self):
         import selfcheckgpt.modeling_selfcheck as upstream
@@ -720,35 +724,103 @@ class RunIntegrityTests(unittest.TestCase):
         self.assertTrue(table["minicheck_score"].notna().all())
         self.assertTrue(table["summac_score"].notna().all())
 
-    def test_run_plan_precedence_flag_over_section_over_plan(self):
+    def _plan(self, run=None, datasets=None, sections=None, reduction=None, **flags):
+        """apply_plan on a fresh config; `sections` are the config's detector
+        sections, `flags` the command-line arguments."""
         import argparse
         import main
-
         config = {
-            "run": {"runs": 3, "samples_per_dataset": 50, "detectors": ["selfcheckgpt", "minicheck"],
-                    "selfcheckgpt_samples": 5, "reduce": True, "reduction_iterations": 3},
-            "datasets": [{"name": "a", "source": "json"}, {"name": "b", "source": "synthetic", "max_samples": 8}],
-            "detectors": {}, "reduction": {}, "benchmark": {},
+            "run": dict(run or {"runs": 3, "samples_per_dataset": 50, "detectors": ["selfcheckgpt", "minicheck"],
+                                "selfcheckgpt_samples": 5, "reduce": True, "reduction_iterations": 3}),
+            "datasets": [dict(d) for d in (datasets or [{"name": "a", "source": "json"},
+                                                        {"name": "b", "source": "synthetic", "max_samples": 8}])],
+            "detectors": {k: dict(v) for k, v in (sections or {}).items()},
+            "reduction": dict(reduction or {}), "benchmark": {},
         }
-        args = argparse.Namespace(output=None, detectors=None, max_samples=None, n_samples=2,
-                                  max_iterations=None, device=None, runs=None, reduce=False,
-                                  no_reduce=False)
-        plan = main.apply_plan(config, args)
+        args = argparse.Namespace(**{"output": None, "detectors": None, "max_samples": None, "n_samples": None,
+                                     "max_iterations": None, "device": "cpu", "runs": None, "reduce": False,
+                                     "no_reduce": False, **flags})
+        return main.apply_plan(config, args), config
+
+    def test_run_plan_precedence_flag_over_section_over_plan(self):
+        # run block as the default
+        plan, config = self._plan()
         self.assertEqual(plan["runs"], 3)
-        self.assertEqual(plan["samples_per_dataset"], {"a": 50, "b": 8})
-        self.assertEqual(plan["selfcheckgpt_samples"], 2)
+        self.assertEqual(plan["samples_per_dataset"], {"a": 50, "b": 8})   # a dataset's own cap wins
+        self.assertEqual(plan["selfcheckgpt_samples"], 5)
+        self.assertEqual(plan["reduction_iterations"], 3)
         self.assertEqual(plan["detectors"], ["selfcheckgpt", "minicheck"])
         self.assertTrue(plan["reduce"])
         self.assertTrue(config["detectors"]["minicheck"]["enabled"])
         self.assertFalse(config["detectors"]["summac"]["enabled"])
+        # a detector section's own setting wins over the run block
+        plan, _ = self._plan(sections={"selfcheckgpt": {"n_samples": 7}}, reduction={"max_iterations": 1})
+        self.assertEqual((plan["selfcheckgpt_samples"], plan["reduction_iterations"]), (7, 1))
+        # flags win over everything
+        plan, _ = self._plan(sections={"selfcheckgpt": {"n_samples": 7}}, n_samples=2, max_samples=2,
+                             max_iterations=4, runs=1)
+        self.assertEqual(plan["selfcheckgpt_samples"], 2)
+        self.assertEqual(plan["samples_per_dataset"], {"a": 2, "b": 2})
+        self.assertEqual((plan["reduction_iterations"], plan["runs"]), (4, 1))
+        # reduce: flag > run block; the section's `enabled` is ignored; needs a sampling detector
+        plan, _ = self._plan(no_reduce=True)
+        self.assertFalse(plan["reduce"])
+        run_off = {"runs": 1, "detectors": ["selfcheckgpt"], "reduce": False}
+        plan, _ = self._plan(run=run_off, reduction={"enabled": True})
+        self.assertFalse(plan["reduce"])
+        plan, _ = self._plan(run=run_off, reduce=True)
+        self.assertTrue(plan["reduce"])
+        plan, _ = self._plan(detectors=["minicheck"])
+        self.assertFalse(plan["reduce"])  # reduction needs selfcheckgpt or uqlm
+        # without a flag or run.detectors, the sections' `enabled` flags decide
+        plan, _ = self._plan(run={"runs": 1}, sections={"summac": {"enabled": True}})
+        self.assertEqual(plan["detectors"], ["summac"])
 
-        config2 = {**config, "run": dict(config["run"]), "datasets": [{"name": "a"}],
-                   "detectors": {}, "reduction": {}}
-        args2 = argparse.Namespace(**{**vars(args), "detectors": ["minicheck"], "max_samples": 2, "runs": 1})
-        plan2 = main.apply_plan(config2, args2)
-        self.assertFalse(plan2["reduce"])  # reduction needs selfcheckgpt
-        self.assertEqual(plan2["samples_per_dataset"], {"a": 2})
-        self.assertEqual(plan2["runs"], 1)
+    def test_summary_keeps_a_row_for_every_detector_and_model(self):
+        import pandas as pd
+        import main
+
+        class Runner:
+            def thresholds(self):
+                return {"sc_score": 0.5, "judge_score": 0.5, "dead_score": 0.5}
+
+            def generator_columns(self):
+                return ["sc_score"]
+        rows = []
+        for model in ("m1", "m2"):
+            for case, label in (("q:0", 0), ("q:1", 1)):
+                rows.append({"case_id": case, "label": label, "model": model,
+                             "sc_score": None if model == "m2" else (0.9 if label else 0.1),
+                             "judge_score": 0.8 if label else 0.2, "dead_score": None})
+        summary = main.summarise(pd.DataFrame(rows), Runner())
+        got = {(r.detector, r.model): (r.n_cases, r.n_failed) for r in summary.itertuples()}
+        self.assertEqual(got[("sc", "m1")], (2, 0))
+        self.assertEqual(got[("sc", "m2")], (0, 2))            # the failed model keeps its row
+        self.assertEqual(got[("judge", main.MODEL_INDEPENDENT)], (2, 0))   # scored once per case
+        self.assertEqual(got[("dead", main.MODEL_INDEPENDENT)], (0, 2))
+
+    def test_confidence_interval_needs_enough_pairs(self):
+        from reporting import aggregate as agg
+        self.assertTrue(all(v != v for v in agg.bootstrap_ci([0.1, -0.2, 0.3])))   # NaN: too few
+        low, high = agg.bootstrap_ci([-0.2] * 8 + [-0.1] * 8)
+        self.assertLess(high, 0)            # clearly below zero
+        self.assertLessEqual(low, high)
+
+    def test_constant_detector_is_flagged_as_no_signal(self):
+        import pandas as pd
+        from reporting import aggregate as agg
+        raw = pd.DataFrame({"a_score": [0.1, 0.9, 0.4], "flat_score": [1.0, 1.0, 1.0]})
+        self.assertEqual(agg.constant_detectors(raw), ["flat"])
+
+    def test_mean_std_across_runs(self):
+        import pandas as pd
+        from reporting import aggregate as agg
+        frame = pd.DataFrame({"run": ["run_01", "run_02", "run_03"], "detector": ["d"] * 3,
+                              "roc_auc": [0.6, 0.7, 0.8]})
+        row = agg.mean_std(frame, ["detector"], ["roc_auc"]).iloc[0]
+        self.assertAlmostEqual(row["roc_auc_mean"], 0.7)
+        self.assertAlmostEqual(row["roc_auc_std"], 0.1)          # sample std (n − 1)
+        self.assertEqual(row["n_runs"], 3)
 
     def test_ollama_failure_raises_instead_of_returning_empty_text(self):
         fake_ollama = types.ModuleType("ollama")
