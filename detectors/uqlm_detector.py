@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import io
 from typing import Dict, List, Optional, Sequence
 
@@ -42,6 +43,28 @@ from models.prompts import grounded_prompt
 CONSISTENCY_SCORERS = ("semantic_negentropy", "noncontradiction", "entailment",
                        "cosine_sim", "exact_match", "bert_score")
 DEFAULT_SCORERS = ("semantic_negentropy", "noncontradiction", "entailment", "cosine_sim", "bert_score")
+
+
+@contextlib.contextmanager
+def _sentence_transformer_on(device: Optional[str]):
+    """UQLM passes `device` to its NLI and BERTScore models but not to the
+    cosine scorer's SentenceTransformer (uqlm/black_box/cosine.py), which then
+    takes the GPU whenever one exists. While BlackBoxUQ is built, the class
+    it imports gets the same device; the model and its outputs are unchanged."""
+    if not device:
+        yield
+        return
+    try:
+        import sentence_transformers
+    except ImportError:
+        yield
+        return
+    original = sentence_transformers.SentenceTransformer
+    sentence_transformers.SentenceTransformer = functools.partial(original, device=device)
+    try:
+        yield
+    finally:
+        sentence_transformers.SentenceTransformer = original
 
 
 class UQLMConsistencyDetector:
@@ -62,7 +85,7 @@ class UQLMConsistencyDetector:
             from uqlm import BlackBoxUQ
         except ImportError as exc:
             raise RuntimeError("UQLM is not installed: pip install -r requirements.txt") from exc
-        with contextlib.redirect_stdout(io.StringIO()):
+        with contextlib.redirect_stdout(io.StringIO()), _sentence_transformer_on(self.device):
             self._uq = BlackBoxUQ(scorers=self.scorers, device=self.device, use_best=False)
 
     def shared_nli(self):

@@ -598,6 +598,17 @@ class ReductionRunnerTests(unittest.TestCase):
         self.assertEqual(result, ("P", "R", "F1"))
         self.assertEqual(built, [("en", True, "cpu")])
 
+    def test_uqlm_cosine_model_gets_the_configured_device(self):
+        from detectors.uqlm_detector import _sentence_transformer_on
+        fake = types.ModuleType("sentence_transformers")
+        fake.SentenceTransformer = lambda name, **kwargs: kwargs
+        with patch.dict(sys.modules, {"sentence_transformers": fake}):
+            with _sentence_transformer_on("cpu"):
+                from sentence_transformers import SentenceTransformer   # as uqlm imports it
+                self.assertEqual(SentenceTransformer("m", trust_remote_code=True),
+                                 {"device": "cpu", "trust_remote_code": True})
+            self.assertEqual(fake.SentenceTransformer("m"), {})        # restored afterwards
+
     def test_cove_parses_numbered_questions(self):
         from reducers.cove import ChainOfVerificationReducer
         self.assertEqual(ChainOfVerificationReducer.parse_questions("1. Who?\n- When was it?\n\nQ3: Where?"),
@@ -834,6 +845,27 @@ class RunIntegrityTests(unittest.TestCase):
                                      "max_iterations": None, "device": "cpu", "runs": None, "reduce": False,
                                      "no_reduce": False, **flags})
         return main.apply_plan(config, args), config
+
+    def test_auto_device_leaves_a_small_gpu_to_ollama(self):
+        import os
+        import main
+        main.DEVICE_NOTE.clear()
+        with patch("utils.gpu.nvidia_gpu", return_value=("NVIDIA GeForce RTX 5060", 7.9)), \
+                patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+            plan, config = self._plan(device=None)
+            self.assertEqual(config["detectors"]["selfcheckgpt"]["device"], "cpu")
+            self.assertEqual(os.environ.get("CUDA_VISIBLE_DEVICES"), "")   # libraries cannot take the GPU
+            self.assertIn("RTX 5060", main.DEVICE_NOTE[0])
+        main.DEVICE_NOTE.clear()
+        with patch("utils.gpu.nvidia_gpu", return_value=("NVIDIA A100", 40.0)), \
+                patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+            plan, config = self._plan(device=None)
+            self.assertEqual(config["detectors"]["selfcheckgpt"]["device"], "cuda")
+            self.assertNotIn("CUDA_VISIBLE_DEVICES", os.environ)
+            plan, config = self._plan(device="cpu")   # an explicit flag wins
+            self.assertEqual(config["detectors"]["uqlm"]["device"], "cpu")
 
     def test_run_plan_precedence_flag_over_section_over_plan(self):
         # run block as the default

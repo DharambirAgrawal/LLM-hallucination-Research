@@ -344,9 +344,20 @@ validation and the reduction stage. So at most one generator, plus the judge
 (`mistral:7b`) and the detectors' torch models (~6 GB in total), share the
 GPU at any moment.
 
-`gpt-oss:20b` needs ~13 GB by itself; the other generators need 2–5 GB. On a
-smaller GPU, memory runs out while a model loads. The run then recovers on its
-own instead of failing:
+**Which device `device: auto` picks.** On a GPU with less than 16 GB (e.g. an
+8 GB RTX 5060), the detectors (~6 GB) and a 4–5 GB Ollama model do not fit
+together, so the GPU is left to Ollama and the detectors run on the CPU. The
+detector process then does not see the GPU at all, so no library can take GPU
+memory by itself. Ollama keeps the whole GPU and puts what does not fit on
+the CPU by itself (`ollama ps` shows e.g. `20%/80% CPU/GPU`). The Detectors
+section of the terminal says which was chosen and why. The scores are the
+same; the detectors are slower, and the preflight's time estimate includes
+that. On 16 GB or more the detectors use the GPU. `--device cuda` or
+`--device cpu` overrides the choice.
+
+`gpt-oss:20b` needs ~13 GB by itself; the other generators need 2–5 GB. If
+memory still runs out while a model loads, the run recovers on its own instead
+of failing:
 
 1. **An Ollama model does not fit** ("model failed to load … resource
    limitations"): the other models loaded in Ollama are unloaded, the torch
@@ -360,7 +371,7 @@ Each move is logged as a warning, and the device used is recorded in
 `config_used.yaml`. The scores are the same on the CPU; only slower. If a model
 still does not fit, the error says so; check `nvidia-smi` for other programs
 using the GPU, or replace the model with a smaller one. To keep the detectors
-off the GPU from the start, run with `--device cpu`.
+off the GPU from the start, run with `--device cpu` (the default below 16 GB).
 
 While a run is going you can watch memory with `nvidia-smi` and see which
 models Ollama holds with `ollama ps`.

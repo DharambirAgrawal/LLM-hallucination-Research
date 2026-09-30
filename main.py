@@ -106,14 +106,35 @@ def load_config(path: str) -> dict:
     return config
 
 
+# why `auto` chose what it chose; printed in the Detectors section
+DEVICE_NOTE: list[str] = []
+
+
+# detectors that run torch models (MiniCheck picks its device by itself)
+TORCH_DETECTORS = ("selfcheckgpt", "uqlm", "summac", "alignscore", "minicheck")
+
+
 def _resolve_device(device: str) -> str:
+    """`auto`: the GPU only when it is large enough to hold the detectors next
+    to Ollama's models (utils/gpu.py); otherwise the GPU is left to Ollama."""
     if device != "auto":
         return device
-    try:
-        import torch
-        return "cuda" if torch.cuda.is_available() else "cpu"
-    except ImportError:
+    from utils.gpu import AUTO_GPU_MIN_GIB, nvidia_gpu
+    gpu = nvidia_gpu()
+    if gpu is None:
+        try:
+            import torch
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        except ImportError:
+            return "cpu"
+    name, total = gpu
+    if total < AUTO_GPU_MIN_GIB:
+        if not DEVICE_NOTE:
+            DEVICE_NOTE.append(
+                f"{name} has {total:.1f} GB (< {AUTO_GPU_MIN_GIB} GB): the GPU is left to Ollama, "
+                "detectors run on the CPU (same scores, slower; --device cuda to override)")
         return "cpu"
+    return "cuda"
 
 
 SMOKE = {"runs": 2, "max_samples": 2, "n_samples": 2, "max_iterations": 1}
@@ -163,10 +184,18 @@ def apply_plan(config: dict, args: argparse.Namespace) -> dict:
     red["enabled"] = (any(n in selected for n in SAMPLING_DETECTORS) and not args.no_reduce
                       and bool(args.reduce or plan.get("reduce", False)))
 
-    # "auto" (the config default): the GPU when torch sees one, else the CPU
-    for name in ("selfcheckgpt", "uqlm", "summac", "alignscore"):
+    # "auto" (the config default): see _resolve_device
+    for name in TORCH_DETECTORS:
         wanted = args.device or detectors_cfg[name].get("device", "auto")
         detectors_cfg[name]["device"] = _resolve_device(wanted)
+    # Detectors on the CPU: hide the GPU from this process, so libraries that
+    # pick the GPU by themselves (UQLM's cosine model, MiniCheck) cannot take
+    # memory Ollama needs. Ollama is a separate process and keeps the GPU.
+    if all(detectors_cfg[n]["device"] == "cpu" for n in TORCH_DETECTORS if n in selected):
+        import os
+        from utils.gpu import nvidia_gpu
+        if nvidia_gpu() is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
     resolved = {
         "runs": max(1, int(args.runs if args.runs is not None else plan.get("runs", 1))),
@@ -467,6 +496,8 @@ def main() -> None:
         console.line("none selected (run.detectors or --detectors)")
     for name in enabled:
         console.kv(name, describe_detector(name, config["detectors"][name], config.get("judge", {})))
+    if DEVICE_NOTE and any(n in enabled for n in TORCH_DETECTORS):
+        console.kv("device", DEVICE_NOTE[0])
 
     if args.dry_run:
         console.section("Dry run complete")
