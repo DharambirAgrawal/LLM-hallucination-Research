@@ -731,6 +731,7 @@ class RunIntegrityTests(unittest.TestCase):
                                                    "n_samples": 2, "threshold": 3.0}},
                             [ReplayModel(["Python was released in 1991."])])
             produced = generate(run)
+            self.assertIn("4 questions from 1 dataset", (run / "report.html").read_text(encoding="utf-8"))
             for name in ("REPORT.md", "report.html", "report.docx", "takeaways.md"):
                 self.assertTrue((run / name).is_file(), name)
             self.assertTrue(any((run / "charts").glob("*.png")))
@@ -789,6 +790,11 @@ class RunIntegrityTests(unittest.TestCase):
                 generate(root / run)
                 ranking = pd.read_csv(root / run / "tables" / "detector_ranking.csv")
                 self.assertEqual(sorted(ranking["detector"]), ["MiniCheck", "SelfCheckGPT n-gram"])
+                report_html = (root / run / "report.html").read_text(encoding="utf-8")
+                self.assertIn("Baseline versus each method", report_html)
+                self.assertIn("lower measured hallucination risk", report_html)
+                self.assertTrue((root / run / "charts" / "baseline_vs_methods.png").is_file())
+                self.assertFalse((root / run / "charts" / "answer_latency.png").exists())
                 for name in ("report.docx", "report.html", "REPORT.md", "takeaways.md"):
                     self.assertTrue((root / run / name).is_file(), f"{run}/{name}")
             generate(root, out_dir=root / "combined")
@@ -930,6 +936,22 @@ class RunIntegrityTests(unittest.TestCase):
         low, high = agg.bootstrap_ci([-0.2] * 8 + [-0.1] * 8)
         self.assertLess(high, 0)            # clearly below zero
         self.assertLessEqual(low, high)
+
+    def test_reduction_interval_needs_distinct_questions(self):
+        import pandas as pd
+        from reporting import aggregate as agg
+
+        tiny = pd.DataFrame({"condition": ["greedy"] * 10, "detector": ["mini"] * 10,
+                             "sample_id": ["q1"] * 5 + ["q2"] * 5,
+                             "model": [f"m{i}" for i in range(5)] * 2,
+                             "delta": [-0.2] * 10})
+        row = agg.method_effects(tiny, ["mini"]).iloc[0]
+        self.assertEqual((row.n_pairs, row.n_questions), (10, 2))
+        self.assertTrue(pd.isna(row.ci_low) and pd.isna(row.ci_high))
+
+        enough = pd.concat([tiny.assign(sample_id=f"q{i}") for i in range(10)], ignore_index=True)
+        row = agg.method_effects(enough, ["mini"]).iloc[0]
+        self.assertLess(row.ci_high, 0)
 
     def test_constant_detector_is_flagged_as_no_signal(self):
         import pandas as pd

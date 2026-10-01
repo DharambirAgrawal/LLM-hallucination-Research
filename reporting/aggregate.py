@@ -268,6 +268,7 @@ def per_unit(deltas: pd.DataFrame) -> pd.DataFrame:
 
 
 MIN_PAIRS_FOR_CI = 10   # below this a bootstrap interval is not meaningful
+MIN_QUESTIONS_FOR_CI = 10  # repeated models/runs cannot replace distinct questions
 
 
 def bootstrap_ci(values, n_resamples: int = 2000, seed: int = 0, level: float = 0.95):
@@ -284,16 +285,37 @@ def bootstrap_ci(values, n_resamples: int = 2000, seed: int = 0, level: float = 
     return float(np.quantile(means, tail)), float(np.quantile(means, 1 - tail))
 
 
+def question_cluster_ci(group: pd.DataFrame, n_resamples: int = 2000, seed: int = 0,
+                        level: float = 0.95) -> tuple[float, float]:
+    """Resample questions, retaining their model results together.
+
+    Several generator models answer the same question, so those pairs are
+    correlated. Treating them as independent makes the interval too narrow.
+    """
+    by_question = group.groupby("sample_id")["delta"].agg(["sum", "count"])
+    if len(by_question) < MIN_QUESTIONS_FOR_CI or len(group) < MIN_PAIRS_FOR_CI:
+        return np.nan, np.nan
+    rng = np.random.default_rng(seed)
+    selected = rng.integers(0, len(by_question), size=(n_resamples, len(by_question)))
+    totals = by_question["sum"].to_numpy()[selected].sum(axis=1)
+    counts = by_question["count"].to_numpy()[selected].sum(axis=1)
+    means = totals / counts
+    tail = (1 - level) / 2
+    return float(np.quantile(means, tail)), float(np.quantile(means, 1 - tail))
+
+
 def method_effects(units: pd.DataFrame, detectors: List[str], by: Optional[str] = None) -> pd.DataFrame:
     """Per method and detector (and optionally per model or dataset): mean
-    paired change with a 95% bootstrap CI, and the share of question × model
-    pairs that got better / worse."""
+    paired change with a question-clustered 95% bootstrap CI, and the share
+    of question × model pairs that got better / worse."""
     keys = ["condition", "detector"] + ([by] if by else [])
     rows = []
     for key, group in units[units["detector"].isin(detectors)].groupby(keys, sort=False):
         d = group["delta"].to_numpy(dtype=float)
-        low, high = bootstrap_ci(d)
-        rows.append({**dict(zip(keys, key)), "n_pairs": len(d), "mean_change": float(np.mean(d)),
+        n_questions = group["sample_id"].nunique()
+        low, high = question_cluster_ci(group)
+        rows.append({**dict(zip(keys, key)), "n_pairs": len(d), "n_questions": n_questions,
+                     "mean_change": float(np.mean(d)),
                      "ci_low": low, "ci_high": high,
                      "better": float((d < 0).mean()), "worse": float((d > 0).mean())})
     return pd.DataFrame(rows)

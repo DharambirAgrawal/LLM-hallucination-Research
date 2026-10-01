@@ -30,8 +30,9 @@ from reporting import aggregate as agg  # noqa: E402
 from reporting.document import Report  # noqa: E402
 
 STATUS = ("Not yet reportable research evidence: detector thresholds are not calibrated on a "
-          "held-out split, the validation bar (AUROC ≥ 0.65) is a fixed choice, small runs give wide "
-          "confidence intervals, and no answers were reviewed by humans (see docs/REPRODUCIBILITY.md).")
+          "held-out split, the screening bar (AUROC ≥ 0.65) is a fixed choice, small runs may not "
+          "support confidence intervals, and no answers were reviewed by humans "
+          "(see docs/REPRODUCIBILITY.md).")
 DETECTOR_SOURCES = {
     "selfcheckgpt": "SelfCheckGPT, official package (Manakul et al., 2023)",
     "uqlm": "UQLM, official package (Bouchard et al., 2025)",
@@ -69,8 +70,8 @@ def family_of(detector: str) -> str:
 # ── charts ──────────────────────────────────────────────────────────────
 
 def _save(fig, path: Path) -> Path:
-    fig.tight_layout()
-    fig.savefig(path, dpi=150)
+    fig.tight_layout(pad=1.2)
+    fig.savefig(path, dpi=150, bbox_inches="tight", pad_inches=0.15)
     plt.close(fig)
     return path
 
@@ -89,7 +90,8 @@ def heatmap(table: pd.DataFrame, title: str, path: Path, cmap: str, vmin: float,
     if scale_columns:
         span = np.nanmax(np.abs(values), axis=0, initial=0.0)
         data = values / np.where(span > 0, span, 1.0)
-    fig, ax = plt.subplots(figsize=(max(6, 0.9 * table.shape[1] + 3), max(3, 0.42 * table.shape[0] + 1.6)))
+    fig, ax = plt.subplots(figsize=(max(6, 0.95 * table.shape[1] + 3),
+                                    max(3, 0.5 * table.shape[0] + 1.6)))
     if center is not None:
         from matplotlib.colors import TwoSlopeNorm
         span = max(abs(np.nanmin(data - center)) if np.isfinite(data).any() else 1,
@@ -98,13 +100,13 @@ def heatmap(table: pd.DataFrame, title: str, path: Path, cmap: str, vmin: float,
         image = ax.imshow(data, cmap=cmap, norm=norm, aspect="auto")
     else:
         image = ax.imshow(data, cmap=cmap, vmin=vmin, vmax=vmax, aspect="auto")
-    ax.set_xticks(range(table.shape[1]), [str(c) for c in table.columns], rotation=35, ha="right", fontsize=8)
-    ax.set_yticks(range(table.shape[0]), [str(i) for i in table.index], fontsize=8)
+    ax.set_xticks(range(table.shape[1]), [str(c) for c in table.columns], rotation=35, ha="right", fontsize=9)
+    ax.set_yticks(range(table.shape[0]), [str(i) for i in table.index], fontsize=9)
     for i in range(data.shape[0]):
         for j in range(data.shape[1]):
             if np.isfinite(values[i, j]):
                 mark = "✱" if stars is not None and bool(stars.iloc[i, j]) else ""
-                ax.text(j, i, fmt.format(values[i, j]) + mark, ha="center", va="center", fontsize=7)
+                ax.text(j, i, fmt.format(values[i, j]) + mark, ha="center", va="center", fontsize=8)
     bar = fig.colorbar(image, ax=ax, shrink=0.8)
     if scale_columns:
         bar.set_label("relative to each column's largest change", fontsize=7)
@@ -202,6 +204,7 @@ METHOD_PRETTY = {
 }
 TABLE_NOTES = {
     "detector_ranking.csv": "Stage A: one row per detector (AUROC, AUPRC, F1, answers scored, failures)",
+    "baseline_vs_methods.csv": "Stage B: matched baseline and method risk from the primary detector",
     "reduction_validated.csv": "Stage B: change vs. baseline per method × validated detector, with 95% CI",
     "summary_by_run.csv": "Stage A metrics of every detector × model in every run",
     "summary_mean_std.csv": "Stage A metrics, mean ± std over runs",
@@ -249,7 +252,7 @@ def pct(value) -> str:
 
 def verdict(low, high) -> str:
     if not agg.is_number(low):
-        return "too few pairs to tell"
+        return "descriptive only"
     if high < 0:
         return "lower risk"
     if low > 0:
@@ -259,7 +262,7 @@ def verdict(low, high) -> str:
 
 # ── charts ──────────────────────────────────────────────────────────────
 
-def method_diagram(path: Path) -> Path:
+def method_diagram(path: Path, exploratory: bool = False) -> Path:
     """The experiment in one picture: validate the detectors, then use the
     ones that pass to judge the reduction methods."""
     from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
@@ -284,22 +287,29 @@ def method_diagram(path: Path) -> Path:
     ax.text(0.1, 4.45, "Stage A · can the detectors be trusted?", fontsize=10, color="#0969da", weight="bold")
     box(0.1, 2.55, 3.0, 1.65, "Labeled data", "questions with context and\nanswers already known to be\nfaithful or hallucinated\n(HaluEval · RAGTruth · HaluBench)", "#f6f8fa")
     box(4.0, 2.55, 3.0, 1.65, "Every detector scores\nthe known answers", "SelfCheckGPT · UQLM\n(compare with model samples)\nMiniCheck · SummaC · judge\n(compare with the context)", "#ddf4ff")
-    box(7.9, 2.55, 3.0, 1.65, "Validated detectors", f"AUROC ≥ {VALIDATED_AUROC}:\nthey rank hallucinated answers\nabove faithful ones reliably", "#dafbe1")
+    box(7.9, 2.55, 3.0, 1.65,
+        "Selected detector views" if exploratory else "Screened detectors",
+        "Too few questions to validate;\nshow highest observed AUROC\nonly as a descriptive check" if exploratory else
+        f"AUROC ≥ {VALIDATED_AUROC}:\nused to judge method answers\nwith stated limitations", "#dafbe1")
     arrow(3.1, 3.37, 4.0, 3.37)
     arrow(7.0, 3.37, 7.9, 3.37, "AUROC")
 
     ax.text(0.1, 2.2, "Stage B · do the methods reduce hallucination?", fontsize=10, color="#0969da", weight="bold")
     box(0.1, 0.2, 3.0, 1.75, "Each model answers", "baseline (with context), then\nclosed-book · greedy · Self-Refine\nChain-of-Verification\nUQLM best answer", "#f6f8fa")
-    box(4.0, 0.2, 3.0, 1.75, "Validated detectors\nscore every answer", "same questions, same models,\nsame samples: a paired\ncomparison per question", "#ddf4ff")
-    box(7.9, 0.2, 3.0, 1.75, "Change vs. baseline", "mean change in risk with a\n95% confidence interval,\nshare of answers better / worse", "#fff8c5")
+    box(4.0, 0.2, 3.0, 1.75,
+        "Selected detectors\nscore every answer" if exploratory else "Screened detectors\nscore every answer",
+        "same questions, same models,\nsame samples: a paired\ncomparison per question", "#ddf4ff")
+    box(7.9, 0.2, 3.0, 1.75, "Change vs. baseline",
+        "mean change in risk;\nsmall runs are descriptive\n(no uncertainty interval)" if exploratory else
+        "mean change in risk with a\n95% confidence interval,\nshare of answers better / worse", "#fff8c5")
     arrow(3.1, 1.07, 4.0, 1.07)
     arrow(7.0, 1.07, 7.9, 1.07)
     arrow(9.4, 2.55, 5.5, 1.95)
-    ax.text(8.3, 2.12, "used as judges", fontsize=7, color="#57606a")
+    ax.text(8.3, 2.12, "descriptive view" if exploratory else "used as judges", fontsize=7, color="#57606a")
     return _save(fig, path)
 
 
-def ranking_chart(ranking: pd.DataFrame, path: Path) -> Optional[Path]:
+def ranking_chart(ranking: pd.DataFrame, path: Path, exploratory: bool = False) -> Optional[Path]:
     if ranking.empty or ranking["AUROC"].isna().all():
         return None
     data = ranking.dropna(subset=["AUROC"]).iloc[::-1]
@@ -313,12 +323,14 @@ def ranking_chart(ranking: pd.DataFrame, path: Path) -> Optional[Path]:
     ax.axvline(0.5, color="#cf222e", linestyle="--", linewidth=1)
     ax.axvline(VALIDATED_AUROC, color="#1a7f37", linestyle=":", linewidth=1.2)
     ax.text(0.5, len(data) - 0.4, " chance", color="#cf222e", fontsize=8, va="bottom")
-    ax.text(VALIDATED_AUROC, len(data) - 0.4, f" validated ≥ {VALIDATED_AUROC}", color="#1a7f37", fontsize=8, va="bottom")
+    ax.text(VALIDATED_AUROC, len(data) - 0.4, f" screening bar ≥ {VALIDATED_AUROC}",
+            color="#1a7f37", fontsize=8, va="bottom")
     for y, v in enumerate(data["AUROC"]):
         ax.text(min(v, 0.97) + 0.01, y, f"{v:.2f}", va="center", fontsize=8)
     ax.set_xlim(0, 1.05)
     ax.set_xlabel("AUROC (1 = always ranks the hallucinated answer higher, 0.5 = coin flip)")
-    ax.set_title("Stage A · How well each detector separates hallucinated from faithful answers", fontsize=10)
+    ax.set_title("Stage A · Observed separation on labeled answers"
+                 + (" (small sample)" if exploratory else ""), fontsize=10)
     from matplotlib.patches import Patch
     ax.legend(handles=[Patch(color="#0969da", label="compares with the model's own samples"),
                        Patch(color="#1a7f37", label="compares with the context")],
@@ -329,26 +341,88 @@ def ranking_chart(ranking: pd.DataFrame, path: Path) -> Optional[Path]:
 def effects_chart(effects: pd.DataFrame, validated: List[str], auroc: Dict[str, float], path: Path) -> Optional[Path]:
     if effects.empty:
         return None
-    panels = [d for d in validated if d in set(effects["detector"])][:4]
+    panels = [d for d in validated if d in set(effects["detector"])][:2]
     if not panels:
         return None
     methods = [m for m in METHOD_PRETTY if m in set(effects["condition"])]
-    fig, axes = plt.subplots(1, len(panels), figsize=(4.2 * len(panels) + 1.5, 0.55 * len(methods) + 1.8), squeeze=False)
-    for ax, det in zip(axes[0], panels):
-        e = effects[effects["detector"] == det].set_index("condition").reindex(methods).iloc[::-1]
-        colours = ["#1a7f37" if h < 0 else "#cf222e" if l > 0 else "#8c959f"
-                   for l, h in zip(e["ci_low"].fillna(0), e["ci_high"].fillna(0))]
+    fig, axes = plt.subplots(len(panels), 1, figsize=(9, max(3.4, len(panels) * 2.9)), squeeze=False)
+    for ax, det in zip(axes[:, 0], panels):
+        e = (effects[effects["detector"] == det].set_index("condition")
+             .reindex(methods).dropna(subset=["mean_change"]).iloc[::-1])
+        colours = ["#1a7f37" if v < 0 else "#cf222e" for v in e["mean_change"].fillna(0)]
         err = [(e["mean_change"] - e["ci_low"]).fillna(0).clip(lower=0).to_numpy(),
                (e["ci_high"] - e["mean_change"]).fillna(0).clip(lower=0).to_numpy()]
         ax.barh([METHOD_PRETTY[m] for m in e.index], e["mean_change"], color=colours, xerr=err, capsize=3)
         ax.axvline(0, color="#24292f", linewidth=1)
         ax.set_title(f"{pretty(det)} (AUROC {auroc.get(det, float('nan')):.2f})", fontsize=9)
-        ax.set_xlabel("change in risk vs. baseline", fontsize=8)
+        ax.set_xlabel("Mean risk change: left is lower risk; right is higher risk", fontsize=8)
         ax.tick_params(labelsize=8)
-    for ax in axes[0][1:]:
-        ax.set_yticklabels([])
-    fig.suptitle("Stage B · Change in hallucination risk vs. the baseline answer "
-                 "(green = lower risk, red = higher, grey = no clear change; bars = 95% CI)", fontsize=10)
+    fig.suptitle("Stage B · Paired change vs. the baseline answer (whiskers when CI is available)", fontsize=10)
+    return _save(fig, path)
+
+
+def paired_risk_table(reduction: pd.DataFrame, detector: str) -> pd.DataFrame:
+    """Absolute baseline and method risk on the same answered pairs."""
+    score = f"{detector}_score"
+    keys = ["run", "sample_id", "model"]
+    if reduction.empty or not set([*keys, "condition", score]).issubset(reduction.columns):
+        return pd.DataFrame()
+    base = reduction.loc[reduction["condition"] == "baseline", keys + [score]].rename(
+        columns={score: "baseline_risk"})
+    methods = reduction.loc[reduction["condition"] != "baseline", keys + ["condition", score]].rename(
+        columns={score: "method_risk"})
+    paired = methods.merge(base, on=keys, how="inner", validate="many_to_one").dropna(
+        subset=["baseline_risk", "method_risk"])
+    if paired.empty:
+        return pd.DataFrame()
+    return (paired.groupby("condition", sort=False)
+            .agg(baseline_risk=("baseline_risk", "mean"), method_risk=("method_risk", "mean"),
+                 pairs=("method_risk", "count"), questions=("sample_id", "nunique"))
+            .reset_index())
+
+
+def absolute_risk_chart(paired: pd.DataFrame, detector: str, path: Path) -> Optional[Path]:
+    """The direct baseline-versus-method view shown in the older report."""
+    if paired.empty:
+        return None
+    data = paired.set_index("condition").reindex(
+        [m for m in METHOD_PRETTY if m in set(paired["condition"])]).iloc[::-1]
+    fig, ax = plt.subplots(figsize=(9, max(3.4, 0.65 * len(data) + 1.4)))
+    y = np.arange(len(data))
+    baseline_bars = ax.barh(y - 0.19, data["baseline_risk"], height=0.36,
+                            color="#8c959f", label="Baseline")
+    method_bars = ax.barh(y + 0.19, data["method_risk"], height=0.36,
+                          color="#0969da", label="With method")
+    ax.bar_label(baseline_bars, fmt="%.2f", padding=2, fontsize=8)
+    ax.bar_label(method_bars, fmt="%.2f", padding=2, fontsize=8)
+    ax.set_yticks(y, [METHOD_PRETTY.get(m, m) for m in data.index])
+    ax.set_xlim(0, max(data[["baseline_risk", "method_risk"]].max().max() * 1.18, 0.1))
+    ax.set_xlabel(f"Mean {pretty(detector)} risk on matched answers (lower = less hallucinated)")
+    ax.set_title("Baseline vs. each method · same question and generator model", fontsize=11)
+    ax.legend(loc="lower right", fontsize=8)
+    ax.grid(axis="x", alpha=0.2)
+    return _save(fig, path)
+
+
+def model_effect_chart(frame: pd.DataFrame, model: str, path: Path) -> Optional[Path]:
+    data = frame[frame["model"] == model]
+    if data.empty:
+        return None
+    data = (data.set_index("condition").reindex(
+        [m for m in METHOD_PRETTY if m in set(data["condition"])]).dropna(subset=["mean_change"]).iloc[::-1])
+    if data.empty:
+        return None
+    fig, ax = plt.subplots(figsize=(9, max(3.2, 0.55 * len(data) + 1.3)))
+    values = data["mean_change"].fillna(0)
+    bars = ax.barh([METHOD_PRETTY.get(m, m) for m in data.index], values,
+                   color=["#1a7f37" if v < 0 else "#cf222e" for v in values])
+    ax.bar_label(bars, fmt="%+.2f", padding=3, fontsize=8)
+    ax.axvline(0, color="#24292f", linewidth=1)
+    span = max(values.abs().max(), 0.05) * 1.3
+    ax.set_xlim(-span, span)
+    ax.set_xlabel("Mean risk change vs. baseline (left = lower risk; right = higher risk)")
+    ax.set_title(f"{model} · judged by {pretty(data['detector'].iloc[0])}", fontsize=11)
+    ax.grid(axis="x", alpha=0.2)
     return _save(fig, path)
 
 
@@ -399,10 +473,12 @@ def generate(input_dir: Path, out_dir: Optional[Path] = None, title: Optional[st
     no_signal = agg.constant_detectors(raw_all)      # same score for every answer
     ranking = detector_ranking(summary_ms)
     auroc = dict(zip(ranking.get("key", []), ranking.get("AUROC", [])))
+    n_questions = raw_all["sample_id"].nunique() if "sample_id" in raw_all else 0
+    evidence_limited = n_questions < agg.MIN_QUESTIONS_FOR_CI
     validated = [k for k, v in auroc.items()
                  if agg.is_number(v) and v >= VALIDATED_AUROC and k not in no_signal]
-    fallback = not validated
-    if fallback:  # nothing passed: use the three best, and say so
+    fallback = evidence_limited or not validated
+    if fallback:  # no trustworthy gate: use three for an explicitly descriptive check
         validated = [k for k in ranking.dropna(subset=["AUROC"])["key"] if k not in no_signal][:3] \
             if not ranking.empty else []
 
@@ -448,19 +524,34 @@ def generate(input_dir: Path, out_dir: Optional[Path] = None, title: Optional[st
     # ── charts ──────────────────────────────────────────────────────────
     for old in charts.glob("*.png"):
         old.unlink()
-    fig_method = method_diagram(charts / "how_the_experiment_works.png")
-    fig_rank = ranking_chart(ranking, charts / "detector_ranking.png")
-    fig_dataset = None
+    fig_method = method_diagram(charts / "how_the_experiment_works.png", exploratory=evidence_limited)
+    fig_rank = ranking_chart(ranking, charts / "detector_ranking.png", exploratory=evidence_limited)
+    dataset_figures = []
     if not dataset_ms.empty:
-        order = [k for k in ranking["key"] if k in set(dataset_ms["detector"])]
+        order = [k for k in ranking["key"] if k in set(dataset_ms["detector"])][:7]
         ds = (dataset_ms.groupby(["detector", "dataset"])["roc_auc_mean"].mean().unstack("dataset")
               .reindex(order).rename(index=pretty))
-        fig_dataset = heatmap(ds, "Stage A · AUROC per detector and dataset (0.5 = chance)",
-                              charts / "detector_by_dataset.png", "viridis", 0.3, 1.0)
+        for index, start in enumerate(range(0, len(ds.columns), 5), 1):
+            figure = heatmap(ds.iloc[:, start:start + 5],
+                             "Stage A · AUROC by dataset (0.5 = chance; higher = better)",
+                             charts / f"detector_by_dataset_{index:02d}.png", "viridis", 0.3, 1.0)
+            if figure:
+                dataset_figures.append(figure)
     fig_effects = effects_chart(effects, validated, auroc, charts / "reduction_effects.png")
+    paired = paired_risk_table(reduction, primary) if primary else pd.DataFrame()
+    fig_absolute = absolute_risk_chart(paired, primary, charts / "baseline_vs_methods.png") if primary else None
+    model_figures = {}
+    if not by_model.empty:
+        for index, model in enumerate(sorted(by_model["model"].dropna().unique())):
+            figure = model_effect_chart(
+                by_model, model, charts / f"reduction_model_{index + 1:02d}.png")
+            if figure:
+                model_figures[model] = figure
+    if not paired.empty:
+        paired.to_csv(tables / "baseline_vs_methods.csv", index=False)
 
     def method_grid(frame, col, title, path):
-        if frame.empty or frame[col].nunique() < 2:
+        if frame.empty:
             return None
         order = [m for m in METHOD_PRETTY if m in set(frame["condition"])]
         values = frame.pivot_table(index="condition", columns=col, values="mean_change", sort=False).reindex(order)
@@ -470,8 +561,16 @@ def generate(input_dir: Path, out_dir: Optional[Path] = None, title: Optional[st
                        center=0.0, stars=clear.reindex_like(values).fillna(False).astype(bool))
     fig_b_model = method_grid(by_model, "model", f"Stage B by generator model ({pretty(primary)}; ✱ = 95% CI excludes 0)",
                               charts / "reduction_by_model.png") if primary else None
-    fig_b_dataset = method_grid(by_dataset, "dataset", f"Stage B by dataset ({pretty(primary)}; ✱ = 95% CI excludes 0)",
-                                charts / "reduction_by_dataset.png") if primary else None
+    dataset_effect_figures = []
+    if primary and not by_dataset.empty and by_dataset["dataset"].nunique() > 1:
+        all_datasets = sorted(by_dataset["dataset"].dropna().unique())
+        for index, start in enumerate(range(0, len(all_datasets), 5), 1):
+            subset = by_dataset[by_dataset["dataset"].isin(all_datasets[start:start + 5])]
+            figure = method_grid(subset, "dataset",
+                                 f"Stage B by dataset ({pretty(primary)}; ✱ = 95% CI excludes 0)",
+                                 charts / f"reduction_by_dataset_{index:02d}.png")
+            if figure:
+                dataset_effect_figures.append(figure)
     fig_a_model = None
     gen_rows = summary_ms[summary_ms["model"] != agg.MODEL_INDEPENDENT]
     if gen_rows["model"].nunique() > 1:
@@ -480,15 +579,19 @@ def generate(input_dir: Path, out_dir: Optional[Path] = None, title: Optional[st
         fig_a_model = heatmap(grid.rename(index=pretty), "Stage A · AUROC of the sampling-based detectors "
                               "with each generator model's samples", charts / "detector_by_model.png",
                               "viridis", 0.3, 1.0)
-    fig_all = None
+    all_detector_figures = []
     if not red["overall"][1].empty:
         allt = red["overall"][1].pivot_table(index="condition", columns="detector",
                                               values="mean_delta_mean", sort=False)
         allt = allt.reindex(columns=[k for k in ranking["key"] if k in allt.columns]).rename(
             index=METHOD_PRETTY, columns=pretty)
-        fig_all = heatmap(allt, "Appendix · change vs. baseline seen by every detector (colours scaled per column)",
-                          charts / "reduction_all_detectors.png", "RdYlGn_r", 0, 0, "{:+.2f}", center=0.0,
-                          scale_columns=True)
+        for index, start in enumerate(range(0, len(allt.columns), 5), 1):
+            figure = heatmap(allt.iloc[:, start:start + 5],
+                             "Appendix · paired risk change (colour scaled within each detector)",
+                             charts / f"reduction_all_detectors_{index:02d}.png", "RdYlGn_r", 0, 0,
+                             "{:+.2f}", center=0.0, scale_columns=True)
+            if figure:
+                all_detector_figures.append(figure)
     fig_consistency = consistency_chart(by_run.assign(detector=by_run["detector"].map(pretty)),
                                         charts / "run_consistency.png")
 
@@ -496,6 +599,12 @@ def generate(input_dir: Path, out_dir: Optional[Path] = None, title: Optional[st
     manifests = [r.manifest for r in runs if r.manifest]
     models = sorted({g["name"] for m in manifests for g in m.get("models", [])})
     datasets = {d["name"]: d["n_samples"] for m in manifests for d in m.get("datasets", [])}
+    if not models:
+        source = reduction if not reduction.empty and "model" in reduction else by_run
+        models = sorted(str(m) for m in source.get("model", pd.Series(dtype=str)).dropna().unique()
+                        if m != agg.MODEL_INDEPENDENT)
+    if not datasets and {"dataset", "sample_id"}.issubset(raw_all.columns):
+        datasets = raw_all.groupby("dataset")["sample_id"].nunique().to_dict()
     n_answers = raw_all["case_id"].nunique() if not raw_all.empty else 0
     n_halluc = int(raw_all.drop_duplicates("case_id")["label"].sum()) if not raw_all.empty else 0
     near_chance = [pretty(k) for k, v in auroc.items()
@@ -506,39 +615,68 @@ def generate(input_dir: Path, out_dir: Optional[Path] = None, title: Optional[st
     inverted = [pretty(k) for k, v in auroc.items() if agg.is_number(v) and v <= 0.4]
 
     summary_points = []
-    scope = (f"{len(models)} generator model(s) ({', '.join(models) or '—'}) answered "
-             f"{sum(datasets.values())} questions from {len(datasets)} datasets; the detectors were checked on "
-             f"{n_answers} answers with known labels ({n_halluc} hallucinated); {n_runs} independent run(s).")
+    scope = (f"{len(models)} generator model{'s' if len(models) != 1 else ''} "
+             f"({', '.join(models) or '—'}) answered {sum(datasets.values())} questions from "
+             f"{len(datasets)} dataset{'s' if len(datasets) != 1 else ''}; the detectors were checked on "
+             f"{n_answers} answers with known labels ({n_halluc} hallucinated); "
+             f"{n_runs} independent run{'s' if n_runs != 1 else ''}.")
+    if evidence_limited:
+        summary_points.append(
+            f"Engineering smoke data: only {n_questions} distinct "
+            f"question{'s' if n_questions != 1 else ''}. AUROC rankings and method "
+            "changes below are descriptive; this run cannot validate detectors or establish that a method works.")
     if not ranking.empty and ranking["AUROC"].notna().any():
         top = ranking.iloc[0]
         summary_points.append(
-            f"Most reliable detector: {top['detector']} (AUROC {top['AUROC']:.2f}: given one hallucinated and "
-            f"one faithful answer, it ranks the hallucinated one higher {top['AUROC']:.0%} of the time).")
-        summary_points.append(
-            (f"Validated (AUROC ≥ {VALIDATED_AUROC}): {', '.join(pretty(v) for v in validated)}. "
-             if not fallback else
-             f"No detector reached AUROC {VALIDATED_AUROC}; Stage B below uses the three best "
-             f"({', '.join(pretty(v) for v in validated)}) and is therefore only indicative. ")
-            + (f"Close to chance: {', '.join(near_chance)}." if near_chance else ""))
+            f"Highest observed detector AUROC: {top['detector']} ({top['AUROC']:.2f}; higher AUROC is better "
+            "at separating the labeled answers).")
+        if not evidence_limited:
+            summary_points.append(
+                (f"Passed the AUROC ≥ {VALIDATED_AUROC} screening bar: "
+                 f"{', '.join(pretty(v) for v in validated)}. " if not fallback else
+                 f"No detector reached AUROC {VALIDATED_AUROC}; Stage B uses the three best "
+                 f"({', '.join(pretty(v) for v in validated)}) as an exploratory view. ")
+                + (f"Close to chance: {', '.join(near_chance)}." if near_chance else ""))
         if inverted:
             summary_points.append(f"Pointing the wrong way (AUROC ≤ 0.4): {', '.join(inverted)}.")
         if no_signal:
             summary_points.append(f"No signal at all (the same score for every answer): "
                                   f"{', '.join(pretty(k) for k in no_signal)}.")
     if not effects.empty and primary:
+        candidates = effects[(effects["detector"] == primary) & (effects["condition"] != "closed_book")]
+        if not candidates.empty:
+            best = candidates.sort_values("mean_change").iloc[0]
+            if best["mean_change"] < 0:
+                summary_points.append(
+                    f"Largest observed risk decrease among the reduction methods: "
+                    f"{METHOD_PRETTY.get(best['condition'], best['condition'])} "
+                    f"({best['mean_change']:+.3f} vs. baseline according to {pretty(primary)}; "
+                    + ("descriptive only, too few questions)." if not agg.is_number(best["ci_low"]) else
+                       f"95% CI {best['ci_low']:+.3f} to {best['ci_high']:+.3f})."))
+            else:
+                summary_points.append(
+                    f"No tested reduction method lowered mean {pretty(primary)} risk on these pairs; "
+                    "the full paired results appear in Stage B.")
         for cond in [m for m in METHOD_PRETTY if m in set(effects["condition"])]:
             e = effects[(effects["condition"] == cond) & (effects["detector"] == primary)]
             if e.empty:
                 continue
             e = e.iloc[0]
             others = effects[(effects["condition"] == cond) & (effects["detector"] != primary)]
-            agree = [verdict(r.ci_low, r.ci_high) for r in others.itertuples()]
-            same = sum(v == verdict(e["ci_low"], e["ci_high"]) for v in agree)
-            summary_points.append(
-                f"{METHOD_PRETTY[cond]}: {verdict(e['ci_low'], e['ci_high'])} according to {pretty(primary)} "
-                f"({ci_text(e['mean_change'], e['ci_low'], e['ci_high'])}; better on {e['better']:.0%} of "
-                f"answers, worse on {e['worse']:.0%})"
-                + (f"; {same} of {len(agree)} other validated detector(s) agree." if agree else "."))
+            if not agg.is_number(e["ci_low"]):
+                summary_points.append(
+                    f"{METHOD_PRETTY[cond]}: observed change {e['mean_change']:+.3f} in {pretty(primary)} "
+                    f"risk; lower on {e['better']:.0%} of question × model pairs. Too few distinct "
+                    "questions for an uncertainty interval or a research conclusion.")
+            else:
+                agree = [verdict(r.ci_low, r.ci_high) for r in others.itertuples()
+                         if agg.is_number(r.ci_low)]
+                same = sum(v == verdict(e["ci_low"], e["ci_high"]) for v in agree)
+                summary_points.append(
+                    f"{METHOD_PRETTY[cond]}: {verdict(e['ci_low'], e['ci_high'])} according to {pretty(primary)} "
+                    f"({ci_text(e['mean_change'], e['ci_low'], e['ci_high'])}; better on {e['better']:.0%} of "
+                    f"pairs, worse on {e['worse']:.0%})"
+                    + (f"; {same} of {len(agree)} other detector(s) agree." if agree else "."))
     total_failed = int(fails["count"].sum()) if not fails.empty else 0
     summary_points.append("Nothing failed." if total_failed == 0 else
                           f"{total_failed} scoring failure(s), excluded from the numbers (see Reliability).")
@@ -550,15 +688,23 @@ def generate(input_dir: Path, out_dir: Optional[Path] = None, title: Optional[st
 
     report.h1("Summary")
     report.p(scope)
+    report.note("Reading the numbers.",
+                "Stage A AUROC: higher is better for the detector (0.5 = chance, 1.0 = perfect). "
+                "Stage B risk: lower is better for the answer. Change = method minus baseline, so a "
+                "negative change means lower measured hallucination risk. "
+                "Each detector has its own score scale; compare a method with its baseline using the same detector.")
     report.bullets(summary_points)
-    report.note("Status.", STATUS)
+    report.note("Research status.",
+                (f"This run has only {n_questions} distinct questions and is an engineering check, not a "
+                 "research conclusion. " if evidence_limited else "") + STATUS)
 
     report.h1("How the experiment works")
     report.p("The study asks two questions in order. First (Stage A): which hallucination detectors can be "
              "trusted? Every detector scores answers whose label is already known, and we measure how well it "
              "separates hallucinated from faithful ones. Second (Stage B): does a reduction method make a model "
-             "hallucinate less? Each model answers the same questions with and without each method, and only "
-             "the detectors that passed Stage A judge the answers.")
+             "hallucinate less? Each model answers the same questions with and without each method. "
+             + ("This small run shows selected detector scores descriptively; it cannot validate them."
+                if evidence_limited else "Detectors that passed the Stage A screen judge the answers."))
     report.figure(fig_method, "The two stages of the experiment.")
     report.h2("Data")
     report.bullets([f"{d}: {n} questions" for d, n in datasets.items()] or ["(no manifest found)"])
@@ -575,25 +721,33 @@ def generate(input_dir: Path, out_dir: Optional[Path] = None, title: Optional[st
         "Every score is a risk: higher means more likely hallucinated.",
     ])
     report.h2("Reduction methods")
-    report.bullets([f"{METHOD_PRETTY[m]}: {note}" for m, note in METHOD_NOTES.items()
-                    if reduction.empty or m in set(reduction.get("condition", []))])
+    if reduction.empty:
+        report.p("No reduction method answers were recorded in this result folder.")
+    else:
+        report.bullets([f"{METHOD_PRETTY[m]}: {note}" for m, note in METHOD_NOTES.items()
+                        if m in set(reduction["condition"])])
 
-    report.h1("Stage A · Which detectors can be trusted?")
-    report.figure(fig_rank, "Detectors ranked by AUROC.")
+    report.h1("Stage A · Which detectors separate the labeled answers?")
+    report.figure(fig_rank, "Detector AUROC on labeled answers. Higher is better for a detector.")
     report.note("How to read this chart.",
                 "Each bar is one detector. AUROC is the chance that the detector gives a hallucinated answer a "
                 "higher risk than a faithful one: 1.0 is perfect, 0.5 (red dashed line) is a coin flip. "
-                f"Detectors right of the green dotted line (≥ {VALIDATED_AUROC}) count as validated and judge "
-                "Stage B. Error bars, when shown, span the different generator models.")
+                f"The green dotted line (≥ {VALIDATED_AUROC}) is the planned screening bar. "
+                "Error bars, when shown, span generator models; they are not confidence intervals. "
+                + ("With so few questions, crossing the line does not validate a detector."
+                   if evidence_limited else "Scores past the line are used for Stage B."))
     if not ranking.empty and ranking["AUROC"].notna().any():
         top = ranking.iloc[0]
-        report.p(f"What it shows: {top['detector']} separates the answers best (AUROC {top['AUROC']:.2f}). "
-                 f"{len(validated) if not fallback else 0} of {len(ranking)} detector scores reach the validation "
-                 f"bar" + (f"; {len(near_chance)} are close to chance, so they cannot tell the answers apart on "
-                           "this data." if near_chance else "."))
+        report.p(f"What it shows: {top['detector']} has the highest observed AUROC ({top['AUROC']:.2f}). "
+                 + (f"Only {n_questions} questions were tested, so this ordering is unstable."
+                    if evidence_limited else
+                    f"{len(validated) if not fallback else 0} of {len(ranking)} detector scores reach the "
+                    "screening bar."))
     shown = ranking.drop(columns=["key", "AUROC low", "AUROC high"], errors="ignore").copy()
+    shown = shown.drop(columns=["compares with", "run-to-run std"], errors="ignore")
     for col in ("answers scored", "failed"):
-        shown[col] = shown[col].round().astype("Int64")
+        if col in shown:
+            shown[col] = shown[col].round().astype("Int64")
     if n_runs < 2:
         shown = shown.drop(columns=["run-to-run std"], errors="ignore")
     report.table(shown, "All detectors (AUPRC: like AUROC but focused on finding the hallucinated answers; "
@@ -608,9 +762,10 @@ def generate(input_dir: Path, out_dir: Optional[Path] = None, title: Optional[st
         report.p(f"What it shows: averaged over these detectors, samples from {per_model_auc.index[-1]} make "
                  f"detection easiest (AUROC {per_model_auc.iloc[-1]:.2f}) and samples from "
                  f"{per_model_auc.index[0]} hardest ({per_model_auc.iloc[0]:.2f}).")
-    if fig_dataset:
+    if dataset_figures:
         report.h2("By dataset")
-        report.figure(fig_dataset, "AUROC of every detector on every dataset.")
+        for figure in dataset_figures:
+            report.figure(figure, "Observed AUROC of leading detector scores by dataset; higher is better.")
         report.note("How to read this chart.",
                     "Rows are detectors (best first), columns are datasets; brighter = better separation. A "
                     "detector that is bright on some datasets and dark on others only works for some kinds of "
@@ -623,42 +778,75 @@ def generate(input_dir: Path, out_dir: Optional[Path] = None, title: Optional[st
 
     if not effects.empty:
         report.h1("Stage B · Do the reduction methods reduce hallucination?")
-        report.p("Every method is compared with the model's own baseline answer to the same question, and "
-                 "judged only by the validated detectors"
-                 + (" (none passed, so the three best are used; treat these results as indicative)" if fallback else "")
-                 + ". Repeated runs of the same question and model are averaged first, so each question × model "
-                 "pair counts once; the confidence interval comes from resampling those pairs.")
-        report.figure(fig_effects, "Change in hallucination risk per method, one panel per validated detector.")
+        report.p("Each method is paired with the baseline answer from the same question, generator model, "
+                 "and run. " +
+                 (f"Only {n_questions} distinct questions were used, so the three highest observed detectors "
+                  "show descriptive comparisons; they are not validated judges. " if evidence_limited else
+                  "No detector passed the screening bar, so the three highest observed detectors show "
+                  "exploratory comparisons. " if fallback else
+                  "Only detectors passing Stage A are used for the main comparison. ")
+                 + "Repeated runs of a question and model are averaged first; uncertainty resamples "
+                 "distinct questions, keeping their model results together.")
+        if fig_absolute:
+            report.h2("Baseline versus each method")
+            report.figure(fig_absolute, f"Mean risk from {pretty(primary)} on matched baseline and method answers.")
+            report.note("How to read these bars.",
+                        "Each grey/blue pair uses the same questions, models, and runs. Lower blue than grey "
+                        "means the method produced answers this detector judged less hallucinated. Baseline "
+                        "bars can differ slightly when a method has missing scores; only complete pairs count. "
+                        "Absolute scores from different detectors must not be compared with each other.")
+            direct = paired.assign(method=paired["condition"].map(METHOD_PRETTY),
+                                   change=paired["method_risk"] - paired["baseline_risk"])
+            report.table(direct[["method", "baseline_risk", "method_risk", "change", "pairs", "questions"]]
+                         .rename(columns={"baseline_risk": "baseline risk", "method_risk": "method risk"}),
+                         f"Matched comparison according to {pretty(primary)} (negative change = lower risk):")
+        report.h2("Paired change across detectors")
+        report.figure(fig_effects, "Mean change vs. baseline for the first two selected detector scores.")
         report.note("How to read this chart.",
-                    "Each bar is the average change in risk compared with the baseline answer: left of zero "
-                    "(green) = the method's answers look less hallucinated, right of zero (red) = more. The "
-                    "error bar is the 95% confidence interval; if it crosses zero (grey), the data cannot tell "
-                    "the method apart from the baseline.")
+                    "Each bar is the average change in risk: left of zero (green) means lower measured risk, "
+                    "right of zero (red) means higher. Whiskers show a 95% confidence interval only when "
+                    f"at least {agg.MIN_PAIRS_FOR_CI} question × model pairs and "
+                    f"{agg.MIN_QUESTIONS_FOR_CI} distinct questions are available. Without whiskers, "
+                    "direction is descriptive, not evidence of a reliable effect.")
         tbl = effects.assign(method=effects["condition"].map(METHOD_PRETTY),
                              detector=effects["detector"].map(pretty),
                              change=[ci_text(m, l, h) for m, l, h in zip(effects["mean_change"], effects["ci_low"], effects["ci_high"])],
                              result=[verdict(l, h) for l, h in zip(effects["ci_low"], effects["ci_high"])])
         tbl["better"], tbl["worse"] = tbl["better"].map(pct), tbl["worse"].map(pct)
-        report.table(tbl[["method", "detector", "change", "result", "better", "worse", "n_pairs"]]
-                     .rename(columns={"n_pairs": "pairs"}),
-                     "Per method and validated detector (better/worse = share of question × model pairs):")
+        primary_tbl = tbl[tbl["detector"] == pretty(primary)]
+        report.table(primary_tbl[["method", "change", "result", "better", "worse", "n_pairs", "n_questions"]]
+                     .rename(columns={"n_pairs": "pairs", "n_questions": "questions"}),
+                     f"Paired change according to {pretty(primary)}; better/worse is the share of "
+                     "question × model pairs:")
+        if tbl["detector"].nunique() > 1:
+            report.p("The other selected detectors can disagree; their complete per-method results, "
+                     "pair counts, and intervals are in tables/reduction_validated.csv. "
+                     "Agreement across detectors strengthens a finding; disagreement needs investigation.")
         if "closed_book" in set(effects["condition"]):
             e = effects[(effects["condition"] == "closed_book") & (effects["detector"] == primary)]
             if not e.empty:
-                report.p("Closed-book is a check of the setup, not a candidate method: without the context the "
-                         f"model has nothing to ground its answer in, so risk should go up. Here it changed by "
+                report.p("Closed-book is a check of the setup, not a candidate method: removing context is "
+                         f"expected to increase risk. Here it changed by "
                          f"{ci_text(*e[['mean_change', 'ci_low', 'ci_high']].iloc[0])} according to {pretty(primary)}.")
-        for fig, frame, col, label in ((fig_b_model, by_model, "model", "generator model"),
-                                       (fig_b_dataset, by_dataset, "dataset", "dataset")):
-            if not fig:
-                continue
-            report.h2(f"By {label}")
-            report.figure(fig, f"Change in risk per method and {label}, judged by {pretty(primary)}.")
+        if model_figures:
+            report.h2("Results for each generator model")
+            report.p("Each chart compares the reduction methods for one generator model. "
+                     "Bars left of zero mean lower measured risk than that model's baseline; right means higher. "
+                     "These are descriptive when no interval is available.")
+            for model, figure in model_figures.items():
+                report.h3(str(model))
+                report.figure(figure, f"Paired risk change for {model}, judged by {pretty(primary)}.")
+        if dataset_effect_figures:
+            frame, col, label = by_dataset, "dataset", "dataset"
+            report.h2("By dataset")
+            for figure in dataset_effect_figures:
+                report.figure(figure, f"Change in risk per method and dataset, judged by {pretty(primary)}.")
             report.note("How to read this chart.",
                         f"Each cell is a method's average change in risk vs. the baseline for one {label} (green = "
                         "lower risk). ✱ marks cells whose 95% confidence interval does not include zero; cells "
                         f"without ✱ are not distinguishable from the baseline. Cells with fewer than "
-                        f"{agg.MIN_PAIRS_FOR_CI} question × model pairs get no interval (too few to tell).")
+                        f"{agg.MIN_PAIRS_FOR_CI} pairs or {agg.MIN_QUESTIONS_FOR_CI} distinct questions "
+                        "get no interval (too little data).")
             clear = frame[(frame["ci_high"] < 0) | (frame["ci_low"] > 0)]
             better = clear[clear["mean_change"] < 0]
             worse = clear[clear["mean_change"] > 0]
@@ -670,8 +858,9 @@ def generate(input_dir: Path, out_dir: Optional[Path] = None, title: Optional[st
                 parts.append("clearly higher risk: " + "; ".join(
                     f"{METHOD_PRETTY.get(r.condition, r.condition)} on {getattr(r, col)}" for r in worse.itertuples()))
             if frame["ci_low"].isna().all():
-                report.p(f"What it shows: every {label} has fewer than {agg.MIN_PAIRS_FOR_CI} question × model "
-                         "pairs here, too few for a confidence interval; the full run has enough.")
+                report.p(f"What it shows: these {label} comparisons have fewer than "
+                         f"{agg.MIN_PAIRS_FOR_CI} pairs or {agg.MIN_QUESTIONS_FOR_CI} distinct questions, "
+                         "so they are descriptive only.")
             else:
                 report.p("What it shows: " + (". ".join(parts) + "." if parts else
                                               f"no method is clearly different from the baseline on any single {label}."))
@@ -690,19 +879,29 @@ def generate(input_dir: Path, out_dir: Optional[Path] = None, title: Optional[st
                     f"Baseline answer: {cut(r['baseline answer'], 240)}",
                     f"Answer with this method: {cut(r['method answer'], 240)}",
                 ])
+    else:
+        report.h1("Stage B · Reduction methods")
+        report.p("No reduction answers were recorded for this run."
+                 if reduction.empty else
+                 "No matched method-versus-baseline detector scores were available for a valid comparison. "
+                 "Check the reduction and scoring failures in the Reliability section and the raw CSV files.")
 
     report.h1("Reliability")
     if n_runs > 1 and not ranking.empty and ranking["run-to-run std"].notna().any():
         worst = ranking.sort_values("run-to-run std", ascending=False).iloc[0]
-        report.p(f"Across {n_runs} runs (same questions, fresh model sampling), the largest AUROC variation was "
-                 f"±{worst['run-to-run std']:.3f} ({worst['detector']}). MiniCheck, SummaC, AlignScore and the judge "
-                 "do not use the samples, so they give the same score in every run.")
+        report.p(f"Across {n_runs} runs (same questions, fresh generator samples), the largest AUROC variation was "
+                 f"±{worst['run-to-run std']:.3f} ({worst['detector']}). Scores from MiniCheck, SummaC, "
+                 "AlignScore and the judge are reused across runs because these checks are treated as "
+                 "generator-independent; their reported run-to-run variation is therefore zero by design.")
     else:
-        report.p("Only one run: run-to-run variation is not measured here (see the combined report).")
+        report.p("Run-to-run AUROC variation could not be estimated from the available scores."
+                 if n_runs > 1 else
+                 "Only one run: run-to-run variation is not measured here (see the combined report).")
     if weak_llm:
-        report.p(f"The LLM-based detectors ({', '.join(weak_llm)}) were close to chance. They are only as good "
-                 f"as their judge model ({judge_model}); a small judge cannot grade answers reliably, so compare "
-                 "these with a run that uses a stronger judge before drawing conclusions about the methods.")
+        report.p(f"The LLM-based detectors ({', '.join(weak_llm)}) were close to chance on these labels. "
+                 f"The judge model was {judge_model}; its quality, the prompts, and the dataset may all "
+                 "affect this result. Human review or a separate judge comparison is needed before "
+                 "attributing the cause.")
     if no_signal:
         report.p(f"{', '.join(pretty(k) for k in no_signal)} gave the same score to every answer, so it carries "
                  "no information on this data and is not used to judge anything.")
@@ -719,11 +918,14 @@ def generate(input_dir: Path, out_dir: Optional[Path] = None, title: Optional[st
     report.h1("Appendix")
     report.h2("What exactly was run")
     report.bullets(run_plan(runs, by_run, reduction))
-    if fig_all:
+    if fig_b_model:
+        report.h2("Method changes across generator models")
+        report.figure(fig_b_model, f"Mean paired risk change by method and model, judged by {pretty(primary)}.")
+    if all_detector_figures:
         report.h2("Stage B as seen by every detector")
-        report.figure(fig_all, "Mean change vs. baseline for every detector, including the ones that did not "
-                               "pass Stage A (their numbers are not reliable). Numbers are real values; colours "
-                               "are scaled within each detector.")
+        for figure in all_detector_figures:
+            report.figure(figure, "Mean change vs. baseline for every detector, including those that did not "
+                                  "pass Stage A. Values are real scores; colours are scaled within each detector.")
     if fig_consistency:
         report.h2("AUROC in every run")
         report.figure(fig_consistency, "AUROC of each detector in each run: flat lines = stable.")

@@ -297,26 +297,29 @@ results/<name>/
 | `report.html` | the same report as one self-contained web page (charts embedded) |
 | `REPORT.md` | the same report in Markdown (charts in `charts/`) |
 | `takeaways.md` | just the key findings, in plain sentences |
-| `charts/*.png` | how the experiment works (flow diagram), detectors ranked by AUROC, AUROC per detector × dataset, change in risk per method judged by each validated detector (95% CI), and in the appendix: every detector's view of Stage B and AUROC in every run |
+| `charts/*.png` | experiment flow, detector AUROC, matched baseline versus method risk, paired risk changes, one method-comparison chart per generator model, and detailed dataset/detector views |
 | `tables/*.csv` | every table in the report |
 
-The report reads top to bottom as a research report; every chart has a
-"How to read this chart" box and a "What it shows" sentence:
+The report reads top to bottom as a research report and explains that higher
+AUROC is better for a detector, while lower risk and a negative method-minus-
+baseline change are better for an answer:
 
-1. **Summary**: the answers in plain sentences (most reliable detector,
-   which detectors are validated, for each method whether it lowered risk,
-   with 95% confidence intervals).
+1. **Summary**: the answers in plain sentences (observed detector ranking,
+   how each method changed measured risk, and whether the data support a
+   conclusion).
 2. **How the experiment works**: flow diagram, datasets, detectors and
    methods in one line each.
 3. **Stage A**: detectors ranked by AUROC (chance and validation lines), one
    compact table, AUROC per dataset and (with several models) per generator
    model. A detector that gives every answer the same score is flagged as
    "no signal" and never used as a judge.
-4. **Stage B**: each method's change in risk vs. the baseline answer, judged
-   only by the **validated detectors** (AUROC ≥ 0.65 in Stage A; if none
-   passes, the three best, flagged as indicative), with 95% bootstrap
-   confidence intervals; the same by generator model and by dataset; one
-   example answer per method.
+4. **Stage B**: matched baseline-versus-method bars and numbers, paired risk
+   changes, per-model comparisons, and an example answer per method. The
+   primary detector passes the Stage A AUROC screen on a sufficiently sized
+   run. If the screen fails, or the run has fewer than 10 distinct questions,
+   results are labeled exploratory. Confidence intervals resample questions
+   with their model answers kept together and require at least 10 distinct
+   questions and 10 question × model pairs.
 5. **Reliability**: run-to-run variation, failures by cause.
 6. **Appendix**: exactly what ran (models, versions, commit), Stage B as
    seen by every detector, AUROC per run, and every data file.

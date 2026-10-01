@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import html
 import math
+import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
@@ -20,6 +21,11 @@ import pandas as pd
 def fmt_value(value: object) -> str:
     if value is None:
         return "—"
+    try:
+        if pd.isna(value):
+            return "—"
+    except (TypeError, ValueError):
+        pass
     if isinstance(value, float):
         if math.isnan(value):
             return "—"
@@ -67,12 +73,14 @@ class Report:
         if frame is None or frame.empty:
             return
         if caption:
-            self.p(caption)
+            number = 1 + sum(block.kind == "table" for block in self.blocks)
+            self.p(f"Table {number}. {caption}")
         self.blocks.append(Block("table", frame=frame.reset_index(drop=True)))
 
     def figure(self, path: Path | None, caption: str) -> None:
         if path is not None and Path(path).is_file():
-            self.blocks.append(Block("figure", text=caption, path=Path(path)))
+            number = 1 + sum(block.kind == "figure" for block in self.blocks)
+            self.blocks.append(Block("figure", text=f"Figure {number}. {caption}", path=Path(path)))
 
     # ── Markdown ────────────────────────────────────────────────────────
     def to_markdown(self, out: Path) -> Path:
@@ -113,17 +121,23 @@ class Report:
             "<!doctype html><html lang='en'><head><meta charset='utf-8'>",
             "<meta name='viewport' content='width=device-width, initial-scale=1'>",
             f"<title>{e(self.title)}</title><style>",
-            "body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:1100px;"
-            "margin:24px auto;padding:0 16px;color:#1f2328;background:#fff;line-height:1.5}",
-            "h1{border-bottom:2px solid #d0d7de;padding-bottom:6px}"
-            "h2{margin-top:36px;border-bottom:1px solid #d0d7de;padding-bottom:4px}",
-            ".sub{color:#57606a}.tbl{overflow-x:auto;margin:8px 0 16px}",
-            ".note{background:#f1f8ff;border-left:4px solid #0969da;padding:8px 12px;margin:8px 0 16px}",
-            "table{border-collapse:collapse;font-size:13px}th,td{border:1px solid #d0d7de;"
-            "padding:4px 8px;text-align:left;vertical-align:top}th{background:#f6f8fa}"
+            "body{font-family:Arial,Helvetica,sans-serif;max-width:1000px;"
+            "margin:32px auto;padding:0 24px;color:#1f2328;background:#fff;line-height:1.55}",
+            "h1{font-size:29px;line-height:1.2;border-bottom:3px solid #0969da;padding-bottom:12px}"
+            "h2{font-size:22px;margin-top:46px;border-bottom:1px solid #d0d7de;padding-bottom:7px}"
+            "h3{font-size:17px;margin-top:30px;color:#1f4d78}h4{font-size:15px;color:#1f4d78}",
+            ".sub{color:#57606a;font-size:14px}.tbl{overflow-x:auto;margin:12px 0 26px}",
+            ".table-caption{font-size:13px;font-weight:600;color:#1f4d78;margin:18px 0 5px}",
+            ".note{background:#eef5fc;border-left:4px solid #0969da;padding:12px 16px;margin:16px 0 24px}",
+            "table{border-collapse:collapse;width:100%;font-size:13px}th,td{border-bottom:1px solid #d0d7de;"
+            "padding:8px 10px;text-align:left;vertical-align:top}th{background:#e8eef5;color:#17365d}"
+            "tbody tr:nth-child(even){background:#f8fafc}"
             "td.n{text-align:right;font-variant-numeric:tabular-nums}",
-            "figure{margin:12px 0 24px}img{max-width:100%;border:1px solid #eee}"
-            "figcaption{color:#57606a;font-size:13px}",
+            "figure{margin:18px 0 32px}img{display:block;max-width:100%;max-height:720px;"
+            "height:auto;margin:auto;border:1px solid #eaeef2}"
+            "figcaption{color:#57606a;font-size:13px;margin-top:8px}"
+            "@media print{body{max-width:none;margin:0;padding:0}figure,.note,tr{break-inside:avoid}"
+            "h2,h3,h4{break-after:avoid}}",
             "</style></head><body>",
             f"<h1>{e(self.title)}</h1>",
         ]
@@ -134,7 +148,8 @@ class Report:
                 level = {"h1": 2, "h2": 3, "h3": 4}[b.kind]
                 parts.append(f"<h{level}>{e(b.text)}</h{level}>")
             elif b.kind == "p":
-                parts.append(f"<p>{e(b.text)}</p>")
+                cls = " class='table-caption'" if b.text.startswith("Table ") else ""
+                parts.append(f"<p{cls}>{e(b.text)}</p>")
             elif b.kind == "note":
                 parts.append(f"<div class='note'><b>{e(b.items[0])}</b> {e(b.text)}</div>")
             elif b.kind == "bullets":
@@ -164,15 +179,52 @@ class Report:
     def to_docx(self, out: Path) -> Path:
         from docx import Document
         from docx.enum.section import WD_ORIENT
-        from docx.shared import Inches, Pt
+        from docx.enum.style import WD_STYLE_TYPE
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+        from docx.shared import Inches, Pt, RGBColor
 
         doc = Document()
         section = doc.sections[0]
         section.orientation = WD_ORIENT.LANDSCAPE
         section.page_width, section.page_height = section.page_height, section.page_width
-        for side in ("left_margin", "right_margin", "top_margin", "bottom_margin"):
-            setattr(section, side, Inches(0.6))
-        doc.styles["Normal"].font.size = Pt(10)
+        section.left_margin = section.right_margin = Inches(0.7)
+        section.top_margin = section.bottom_margin = Inches(0.65)
+        section.header_distance = section.footer_distance = Inches(0.3)
+        normal = doc.styles["Normal"]
+        normal.font.name = "Calibri"
+        normal.font.size = Pt(10.5)
+        normal.paragraph_format.space_after = Pt(7)
+        normal.paragraph_format.line_spacing = 1.12
+        for key, size, before, after in (("Title", 22, 0, 9), ("Heading 1", 16, 16, 8),
+                                         ("Heading 2", 13, 13, 6), ("Heading 3", 11.5, 10, 5)):
+            style = doc.styles[key]
+            style.font.name = "Calibri"
+            style.font.size = Pt(size)
+            style.font.bold = True
+            style.font.color.rgb = RGBColor(31, 77, 120)
+            style.paragraph_format.space_before = Pt(before)
+            style.paragraph_format.space_after = Pt(after)
+            style.paragraph_format.keep_with_next = True
+        caption_style = doc.styles.add_style("Report Caption", WD_STYLE_TYPE.PARAGRAPH)
+        caption_style.font.name = "Calibri"
+        caption_style.font.size = Pt(9)
+        caption_style.font.italic = True
+        caption_style.font.color.rgb = RGBColor(87, 96, 106)
+        caption_style.paragraph_format.space_after = Pt(12)
+        doc.styles["List Bullet"].paragraph_format.space_after = Pt(4)
+
+        header = section.header.paragraphs[0]
+        header.text = "HALLUCINATION BENCHMARK  /  RESEARCH RESULTS"
+        header.style = doc.styles["Report Caption"]
+        footer = section.footer.paragraphs[0]
+        footer.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        footer.style = doc.styles["Report Caption"]
+        footer.add_run("Page ")
+        field = OxmlElement("w:fldSimple")
+        field.set(qn("w:instr"), "PAGE")
+        footer._p.append(field)
 
         doc.add_heading(self.title, level=0)
         if self.subtitle:
@@ -181,36 +233,79 @@ class Report:
             if b.kind in ("h1", "h2", "h3"):
                 doc.add_heading(b.text, level={"h1": 1, "h2": 2, "h3": 3}[b.kind])
             elif b.kind == "p":
-                doc.add_paragraph(b.text)
+                if b.text.startswith("Table "):
+                    para = doc.add_paragraph(b.text, style="Report Caption")
+                    para.runs[0].bold = True
+                    para.paragraph_format.keep_with_next = True
+                else:
+                    doc.add_paragraph(b.text)
             elif b.kind == "note":
                 para = doc.add_paragraph()
-                para.paragraph_format.left_indent = Inches(0.3)
+                para.paragraph_format.left_indent = Inches(0.16)
+                para.paragraph_format.right_indent = Inches(0.16)
+                para.paragraph_format.space_before = Pt(6)
+                para.paragraph_format.space_after = Pt(10)
+                shade = OxmlElement("w:shd")
+                shade.set(qn("w:fill"), "EEF5FC")
+                para._p.get_or_add_pPr().append(shade)
                 head = para.add_run(b.items[0] + " ")
                 head.bold = True
                 body = para.add_run(b.text)
-                body.italic = True
             elif b.kind == "bullets":
                 for item in b.items:
                     doc.add_paragraph(item, style="List Bullet")
             elif b.kind == "table":
                 frame = b.frame
                 table = doc.add_table(rows=1, cols=len(frame.columns))
-                table.style = "Light Grid Accent 1"
+                table.style = "Table Grid"
+                table.autofit = False
+                weights = [max(9, min(30, max([len(str(col)),
+                                               *(len(fmt_value(v)) for v in frame[col].head(20))]) + 2))
+                           for col in frame.columns]
+                total = sum(weights)
+                widths = [9.5 * weight / total for weight in weights]
+                for col, width in zip(table.columns, widths):
+                    col.width = Inches(width)
+                tbl_width = table._tbl.tblPr.find(qn("w:tblW"))
+                if tbl_width is not None:
+                    tbl_width.set(qn("w:w"), str(int(9.5 * 1440)))
+                    tbl_width.set(qn("w:type"), "dxa")
                 for cell, col in zip(table.rows[0].cells, frame.columns):
                     cell.text = str(col)
+                    shade = OxmlElement("w:shd")
+                    shade.set(qn("w:fill"), "E8EEF5")
+                    cell._tc.get_or_add_tcPr().append(shade)
+                repeat = OxmlElement("w:tblHeader")
+                repeat.set(qn("w:val"), "true")
+                table.rows[0]._tr.get_or_add_trPr().append(repeat)
                 for row in frame.itertuples(index=False):
                     cells = table.add_row().cells
                     for cell, value in zip(cells, row):
                         cell.text = fmt_value(value)
-                for row in table.rows:
-                    for cell in row.cells:
+                for row_index, row in enumerate(table.rows):
+                    for cell, width in zip(row.cells, widths):
+                        cell.width = Inches(width)
                         for para in cell.paragraphs:
+                            para.paragraph_format.space_after = Pt(2)
                             for run in para.runs:
-                                run.font.size = Pt(8)
-                doc.add_paragraph()
+                                run.font.size = Pt(8.5)
+                                if row_index == 0:
+                                    run.bold = True
+                if doc.paragraphs:
+                    doc.paragraphs[-1].paragraph_format.keep_with_next = True
+                doc.add_paragraph().paragraph_format.space_after = Pt(2)
             elif b.kind == "figure":
-                doc.add_picture(str(b.path), width=Inches(9.0))
-                caption = doc.add_paragraph(b.text)
-                caption.runs[0].italic = True
+                with b.path.open("rb") as image_file:
+                    header = image_file.read(24)
+                aspect = 9.0 / 5.5
+                if header[:8] == b"\x89PNG\r\n\x1a\n":
+                    width_px, height_px = struct.unpack(">II", header[16:24])
+                    aspect = width_px / height_px
+                width = min(9.3, 5.55 * aspect)
+                image_para = doc.add_paragraph()
+                image_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                image_para.paragraph_format.keep_with_next = True
+                image_para.add_run().add_picture(str(b.path), width=Inches(width))
+                doc.add_paragraph(b.text, style="Report Caption")
         doc.save(str(out))
         return out
