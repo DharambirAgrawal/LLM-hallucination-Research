@@ -142,12 +142,13 @@ class ScoreCompletenessTests(unittest.TestCase):
         report = MagicMock(return_value={"report (docx)": Path("report.docx")})
         stubs = {"yaml": module("yaml"), "loguru": module("loguru", logger=MagicMock()),
                  "utils.console": console, "benchmark": module("benchmark"),
+                 "data": module("data"), "data.datasets": module("data.datasets", DatasetLoader=types.SimpleNamespace(detection_cases=lambda group: cases)),
                  "benchmark.reduction_runner": module("benchmark.reduction_runner", ReductionRunner=object),
                  "reporting": module("reporting", generate=report),
                  "utils.run_manifest": module("utils.run_manifest", write_run_files=MagicMock())}
         with patch.dict(sys.modules, stubs), patch.object(utils, "console", console, create=True):
             main = load("main_gate_test", "main.py")
-            main.DatasetLoader = types.SimpleNamespace(detection_cases=lambda group: cases)
+            self.assertFalse(hasattr(main, "DatasetLoader"))  # run_once must import its own dependency
             main.print_table = MagicMock()
             main.summarise = lambda *a: pd.DataFrame([{"n_cases": 1, "model": "m"}])
             with tempfile.TemporaryDirectory() as tmp:

@@ -331,6 +331,7 @@ def run_once(run_dir: Path, run_label: str, config: dict, runner, datasets, gene
              run_name: str = "", make_report: bool = True) -> dict:
     """One complete repetition into `run_dir`; returns its stage timings."""
     from benchmark.reduction_runner import ReductionRunner
+    from data.datasets import DatasetLoader
     from reporting import generate
     from utils.run_manifest import write_run_files
     from utils.completeness import inspect_scores

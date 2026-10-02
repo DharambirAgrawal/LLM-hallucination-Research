@@ -222,6 +222,34 @@ If a preflight check fails, phase 1 stops before the measured runs.
 
 ## What the terminal shows
 
+### Offline replay without Ollama or model downloads
+
+```bash
+python scripts/offline_replay.py
+```
+
+This software test uses exactly two prepared questions, five model labels,
+two distinct runs, six detector families (thirteen scores), and all five
+reducers. Prepared model responses and synthetic external detector APIs
+exercise the real local adapters, reducer workflows, metrics, completeness
+checks, CSV merges, and Markdown/HTML/DOCX report generation. Network
+connections are blocked. Dependencies must already be available; this
+command does not install packages or prepare model environments.
+
+Outputs go to a new `results/offline-replay-<timestamp>/` folder. Every report
+is titled **SYNTHETIC OFFLINE REPLAY · NOT research results**, and each
+manifest identifies the synthetic backend. `replay_checks.json` records
+coverage and numerical/report checks; `prepared_generation_calls.json`
+records the supplied answers. Each run has its reports before the next run
+starts, with the combined reports last. These results test software and
+reporting, not the accuracy or runtime of actual neural detectors.
+
+An existing separate Python with `python-docx` can export the same report
+blocks using `--docx-python /path/to/python`. Word rendering and page QA are
+separate from the replay command.
+
+### Live terminal output
+
 ```text
 ══ LLM hallucination benchmark ═════════════════════════════════════
 ── Run plan ────  runs, questions per dataset, detectors, samples,
