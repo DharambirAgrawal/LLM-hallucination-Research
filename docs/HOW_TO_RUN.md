@@ -72,6 +72,12 @@ anything:
 python main.py --dry-run --detectors selfcheckgpt uqlm uqlm_judge
 ```
 
+The dry run skips datasets whose local files are missing (and remote
+Hugging Face datasets); it lists them for the real run instead of trying
+to load them. If Ollama is unavailable, the dry run marks model tags as
+unchecked and continues. A run exits with an error if a requested Word report fails,
+so a missing report cannot look like a successful experiment.
+
 ### 0.5 Updating a machine that is already set up
 
 After new code has been pushed:

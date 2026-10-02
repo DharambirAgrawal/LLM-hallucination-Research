@@ -376,10 +376,9 @@ def run_once(run_dir: Path, run_label: str, config: dict, runner, datasets, gene
         runner.bank.export(run_dir / "selfcheckgpt_samples.jsonl")
     write_run_files(run_dir, run_config, sys.argv, datasets, generators, started_at, stage_seconds)
     if make_report:
-        try:
-            generate(run_dir, title=f"{run_dir.parent.name}/{run_dir.name}")
-        except Exception as exc:
-            logger.opt(exception=exc).error(f"Report for {run_label} failed: {exc}")
+        produced = generate(run_dir, title=f"{run_dir.parent.name}/{run_dir.name}")
+        if "report (docx)" not in produced:
+            raise RuntimeError(f"Report for {run_label} did not produce report.docx")
     return stage_seconds
 
 
@@ -414,9 +413,11 @@ def main() -> None:
 
     config = load_config(args.config)
     if args.smoke_2q:
-        if args.max_samples is not None or (args.detectors and not args.part) or args.no_reduce:
-            raise SystemExit("--smoke-2q fixes the two-question, all-detector, all-reducer plan; "
-                             "omit --max-samples, --detectors, and --no-reduce")
+        if (args.max_samples is not None or (args.detectors and not args.part) or
+                args.no_reduce or args.runs not in (None, 2)):
+            raise SystemExit("--smoke-2q fixes two questions, two runs, all detectors and reducers; "
+                             "omit --max-samples, --detectors, and --no-reduce, "
+                             "and do not override --runs")
         from utils.smoke import configure_two_question_smoke
         chosen = configure_two_question_smoke(config, DETECTOR_NAMES)
         console.line(f"Two-question smoke dataset: {chosen}")
@@ -472,16 +473,13 @@ def main() -> None:
     data_config = config
     pending_download = []
     if args.dry_run:
-        # Files the Setup step said it would download are not loaded here.
-        data_config = {**config, "datasets": []}
-        for d in config.get("datasets", []):
-            if d.get("source") == "json" and d.get("path") and not Path(d["path"]).is_file():
-                pending_download.append(d["name"])
-            else:
-                data_config["datasets"].append(d)
+        # A dry run must not ask any loader to fetch a missing file, including
+        # RAGTruth and HaluBench, or invoke the Hugging Face remote loader.
+        from utils.offline_plan import local_datasets
+        data_config, pending_download = local_datasets(config)
     datasets = DatasetLoader(data_config, seed=seed).load_all()
     for name in pending_download:
-        console.kv(name, "downloaded on the real run", width=24)
+        console.kv(name, "not loaded in dry run; checked on a real run", width=24)
     wanted = [d["name"] for d in data_config.get("datasets", []) if d.get("enabled", True)]
     missing = [name for name in wanted if name not in datasets]
     if missing:
@@ -609,11 +607,9 @@ def main() -> None:
     from reporting import generate
 
     console.header(f"Combined · {n_runs} run(s) → {output_dir / 'combined'}")
-    produced = {}
-    try:
-        produced = generate(output_dir, out_dir=output_dir / "combined")
-    except Exception as exc:
-        logger.opt(exception=exc).error(f"Combined report failed: {exc}")
+    produced = generate(output_dir, out_dir=output_dir / "combined")
+    if "report (docx)" not in produced:
+        raise RuntimeError("Combined report did not produce report.docx")
     takeaways = output_dir / "combined" / "takeaways.md"
     if takeaways.is_file():
         for line in takeaways.read_text(encoding="utf-8").splitlines():

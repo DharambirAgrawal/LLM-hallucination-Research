@@ -183,9 +183,11 @@ def main() -> None:
     import yaml
     config = yaml.safe_load((ROOT / args.config).read_text()) or {}
     if args.smoke_2q:
-        if args.max_samples is not None or args.detectors or args.no_reduce:
-            raise SystemExit("--smoke-2q fixes the two-question, all-detector, all-reducer plan; "
-                             "omit --max-samples, --detectors, and --no-reduce")
+        if (args.max_samples is not None or args.detectors or args.no_reduce or
+                args.runs not in (None, 2)):
+            raise SystemExit("--smoke-2q fixes two questions, two runs, all detectors and reducers; "
+                             "omit --max-samples, --detectors, and --no-reduce, "
+                             "and do not override --runs")
         from utils.smoke import configure_two_question_smoke
         chosen = configure_two_question_smoke(config, ALL_DETECTORS)
     plan = config.get("run", {})
@@ -300,6 +302,7 @@ def main() -> None:
 
     # Reports: one per run (every detector group together), then combined.
     produced = {}
+    report_failures = []
     ran = [name for name, status, _ in results if status == "ok"]
     if ran and not args.skip_report:
         from reporting import generate
@@ -308,13 +311,22 @@ def main() -> None:
             run_dir = output_dir / f"run_{index:02d}"
             if run_dir.is_dir():
                 try:
-                    generate(run_dir, title=f"{output_dir.name} · {run_dir.name}")
+                    report_files = generate(run_dir, title=f"{output_dir.name} · {run_dir.name}")
+                    if "report (docx)" not in report_files:
+                        raise RuntimeError("report.docx was not produced")
                     console.line(f"✓ {run_dir.name}/report.docx")
                 except Exception as exc:
                     console.line(f"✗ {run_dir.name}: report failed: {exc}")
-        produced = generate(output_dir, out_dir=output_dir / "combined",
-                            title=f"{output_dir.name} · combined over {runs} runs")
-        console.line("✓ combined/report.docx")
+                    report_failures.append(run_dir.name)
+        try:
+            produced = generate(output_dir, out_dir=output_dir / "combined",
+                                title=f"{output_dir.name} · combined over {runs} runs")
+            if "report (docx)" not in produced:
+                raise RuntimeError("report.docx was not produced")
+            console.line("✓ combined/report.docx")
+        except Exception as exc:
+            console.line(f"✗ combined: report failed: {exc}")
+            report_failures.append("combined")
 
     console.header(f"Finished in {console.duration(time.monotonic() - started)}")
     for name, status, seconds in results:
@@ -326,12 +338,13 @@ def main() -> None:
     console.line()
     console.line(f"{output_dir}/")
     for index in range(1, runs + 1):
-        console.line(f"  run_{index:02d}/     complete run: report.docx · report.html · REPORT.md · data")
-    console.line("  combined/   all runs together: report.docx · report.html · takeaways.md   ← start here")
+        console.line(f"  run_{index:02d}/     run data" + (" · reports" if not args.skip_report else ""))
+    if not args.skip_report:
+        console.line("  combined/   all runs together: report.docx · report.html · takeaways.md   ← start here")
     console.line("  logs/       one log per detector group")
     if "report (docx)" in produced:
         console.kv("open", produced["report (docx)"])
-    if any(status != "ok" for _, status, _ in results):
+    if any(status != "ok" for _, status, _ in results) or report_failures:
         raise SystemExit(1)
 
 

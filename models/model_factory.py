@@ -49,6 +49,9 @@ class ModelFactory:
             return
         installed = OllamaModel.installed_details(host)
         if not installed and not OllamaModel.server_reachable(host):
+            if dry_run:
+                console.line(f"? Ollama at {host} is unavailable; model tags cannot be checked offline")
+                return
             raise SystemExit(
                 f"\nCannot reach Ollama at {host}. Start it (`ollama serve`) or "
                 "fix `ollama.host` in the config."
