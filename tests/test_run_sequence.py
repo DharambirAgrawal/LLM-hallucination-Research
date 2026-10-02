@@ -213,10 +213,10 @@ class IndependentScoreTests(unittest.TestCase):
         with dependencies(config()) as (_, Bank):
             generator = types.SimpleNamespace(name="fake-generator", config={})
             generator.sample_n = MagicMock(side_effect=lambda *args, **kwargs:
-                                           [f"generation-{generator.sample_n.call_count}"])
+                                           [f"generation-{generator.sample_n.call_count}"] * kwargs["n"])
             factory = types.SimpleNamespace(ensure_ollama_models=MagicMock(),
                 build_all=lambda cfg: [generator], active_configs=lambda cfg: [{"name": generator.name}])
-            runner = types.SimpleNamespace(bank=Bank(), attach=MagicMock())
+            runner = types.SimpleNamespace(bank=Bank(n_samples=2), attach=MagicMock())
             runner_factory = MagicMock(return_value=runner)
             observed = []
 
@@ -249,7 +249,7 @@ class IndependentScoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             observed = self.exercise_main(Path(temp))
         self.assertEqual([folder.name for folder, _ in observed], ["run_01", "run_02"])
-        self.assertEqual([samples for _, samples in observed], [["generation-2"], ["generation-3"]])
+        self.assertEqual([samples for _, samples in observed], [["generation-2"] * 2, ["generation-3"] * 2])
 
     def test_worker_runs_only_requested_index_and_protects_existing_results(self):
         with tempfile.TemporaryDirectory() as temp:

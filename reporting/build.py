@@ -776,7 +776,7 @@ def generate(input_dir: Path, out_dir: Optional[Path] = None, title: Optional[st
     inverted = [pretty(k) for k, v in auroc.items() if agg.is_number(v) and v <= 0.4]
 
     summary_points = []
-    scope = (f"{len(models)} generator model{'s' if len(models) != 1 else ''} "
+    summary_scope = (f"{len(models)} generator model{'s' if len(models) != 1 else ''} "
              f"({', '.join(models) or '—'}) answered {sum(datasets.values())} questions from "
              f"{len(datasets)} dataset{'s' if len(datasets) != 1 else ''}; the detectors were checked on "
              f"{n_answers} answers with known labels ({n_halluc} hallucinated); "
@@ -851,7 +851,16 @@ def generate(input_dir: Path, out_dir: Optional[Path] = None, title: Optional[st
                     f"Generated {datetime.now():%Y-%m-%d %H:%M} from this run's own data files.")
 
     report.h1("Summary")
-    report.p(scope)
+    report.p(summary_scope)
+    completeness = [(r.folder, (r.manifest or {}).get("score_completeness")) for r in runs]
+    failed_coverage = [str(folder) for folder, status in completeness if status and not status.get("passed")]
+    if failed_coverage:
+        report.note("FAILED · incomplete scores.", "This output is diagnostic and did not pass the score "
+                    "completeness check. Do not treat it as a complete experiment. Failed folders: "
+                    + ", ".join(failed_coverage))
+    elif all(status and status.get("passed") for _, status in completeness):
+        report.note("Score completeness.", "All expected answer rows and finite detector scores passed "
+                    "the recorded checks in every input run folder.")
     report.note("Reading the numbers.",
                 "Stage A AUROC: higher is better for the detector (0.5 = chance, 1.0 = perfect). "
                 "Stage B risk: lower is better for the answer. Change = method minus baseline, so a "
@@ -873,7 +882,7 @@ def generate(input_dir: Path, out_dir: Optional[Path] = None, title: Optional[st
     report.figure(fig_method, "The two stages of the experiment.")
     report.h2("Data")
     report.bullets([f"{d}: {n} questions" for d, n in datasets.items()] or ["(no manifest found)"])
-    report.h2("Detectors (official code for every one)")
+    report.h2("Detectors and implementation details")
     sample_based = [pretty(k) for k in auroc if compares_with(k) == "the model's own samples"]
     context_based = [pretty(k) for k in auroc if compares_with(k) == "the context"]
     report.bullets([
@@ -885,6 +894,13 @@ def generate(input_dir: Path, out_dir: Optional[Path] = None, title: Optional[st
                                                                        for c in auroc) else ""),
         "Every score is a risk: higher means more likely hallucinated.",
     ])
+    if any((r.manifest or {}).get("run_protocol", {}).get("selfcheck_bertscore_short_samples")
+           for r in runs):
+        report.p("SelfCheckGPT BERTScore uses a documented short-sentence compatibility repair: when "
+                 "the official filter removes every sentence from a sampled answer, its nonempty short "
+                 "sentences are retained and scored with the same best-sentence F1 and sample-mean formula. "
+                 "Other inputs use the official scorer unchanged. No samples are redrawn or dropped. "
+                 "This edge-case preprocessing is an adaptation of the official implementation.")
     report.h2("Reduction methods")
     if reduction.empty:
         report.p("No reduction method answers were recorded in this result folder.")
@@ -1114,14 +1130,15 @@ def generate(input_dir: Path, out_dir: Optional[Path] = None, title: Optional[st
         report.p(f"{', '.join(pretty(k) for k in no_signal)} gave the same score to every answer, so it carries "
                  "no information on this data and is not used to judge anything.")
     if fails.empty:
-        report.p("No scoring failures.")
+        report.p("No per-answer error messages were recorded in the available files. "
+                 "Missing-score counts are shown in the before/after tables.")
     else:
         f = (fails.groupby(["stage", "detector"]).agg(failures=("count", "sum"), reason=("error", "first"))
              .reset_index())
         f["reason"] = f["reason"].map(lambda t: cut(t, 110))
-        report.table(f, "Failures are left out of every number above, never scored as 0. Known causes: "
-                        "SelfCheckGPT BERTScore cannot score very short answers (upstream limitation); an LLM judge "
-                        "sometimes replies in a form its parser cannot read.")
+        report.table(f, "Failed measurements are excluded, never scored as 0. Any required missing score "
+                        "fails the current run's completeness check. Older runs may contain the upstream "
+                        "SelfCheckGPT short-sentence error; judge/parser or environment errors are also recorded here.")
 
     report.h1("Appendix")
     report.h2("What exactly was run")
@@ -1193,7 +1210,7 @@ def generate(input_dir: Path, out_dir: Optional[Path] = None, title: Optional[st
     except ImportError:
         logger.warning("python-docx is not installed; report.docx skipped (pip install python-docx)")
     (out_dir / "takeaways.md").write_text(
-        f"# Takeaways — {name}\n\n{scope}\n\n" + "\n".join(f"- {p}" for p in summary_points)
+        f"# Takeaways — {name}\n\n{summary_scope}\n\n" + "\n".join(f"- {p}" for p in summary_points)
         + f"\n\n{STATUS}\n", encoding="utf-8")
     produced.update({"takeaways": out_dir / "takeaways.md", "charts": charts, "tables": tables})
     return produced

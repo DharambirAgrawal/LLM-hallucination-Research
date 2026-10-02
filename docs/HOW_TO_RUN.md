@@ -212,9 +212,13 @@ python scripts/run_full.py --smoke \
 Check: the final table shows ✓ for every detector group, and
 `results/smoke-<date-time>/combined/report.docx` (or `report.html`) opens
 with its summary, charts and tables; each `run_01/`, `run_02/` has its own.
-A few failures for SelfCheckGPT BERTScore on very short answers are an
-upstream limitation, recorded per case; anything else is a problem to look
-at in `logs/`. If a check fails, phase 1 stops the run within minutes.
+Every required detector score must be present and finite. Any missing score,
+partial scorer error, empty answer, or incorrect row count causes a nonzero
+exit. Each detector-group folder records `score_completeness.json`; reports
+from incomplete runs are diagnostic, not passing research results.
+SelfCheckGPT BERTScore's formerly crashing short-sentence inputs have a
+documented preprocessing repair (see `METHOD_SOURCES.md` and the report).
+If a preflight check fails, phase 1 stops before the measured runs.
 
 ## What the terminal shows
 

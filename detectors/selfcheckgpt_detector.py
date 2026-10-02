@@ -20,8 +20,8 @@ sampled passages (detectors/sampling.py):
 
 The response is split into sentences with spaCy en_core_web_sm as in the
 upstream README; the response score is the mean of the upstream sentence
-scores (the paper's passage-level average). Upstream values are reported as
-returned, without clipping. Nothing in the scoring is reimplemented here.
+scores (the paper's passage-level average). Values are not clipped. The
+BERTScore short-sentence compatibility repair is documented below.
 
 One call is routed, not changed: upstream SelfCheckBERTScore calls
 ``bert_score.score(...)`` once per sample, which reloads roberta-large from
@@ -31,6 +31,14 @@ of memory". The module-level ``bert_score`` seen by upstream is replaced by
 ``_LoadedBERTScore``: the same library's ``BERTScorer`` with the same
 arguments (lang, rescale_with_baseline; same model, layer, baseline file,
 idf=False, batch size 64), loaded once on the configured device. Same numbers.
+
+Upstream BERTScore drops sample sentences with <=3 spaCy tokens and crashes
+when a sample has no longer sentences. For that sample only, retain its
+nonempty short sentences and apply the same best-sentence F1 and sample-mean
+formula. Other samples still use upstream unchanged. No samples are redrawn,
+discarded, or replaced. This preprocessing repair is recorded in the report
+and manifest; it is an adaptation on these edge cases, not exact upstream
+preprocessing.
 """
 from __future__ import annotations
 
@@ -173,9 +181,46 @@ class SelfCheckGPTDetector:
                 values = result["sent_level"]["avg_neg_logprob"]
             elif method == "prompt":
                 values = scorer.predict(sentences=sentences, sampled_passages=samples, verbose=False)
+            elif method == "bertscore":
+                values = self._bertscore(sentences, samples)
             else:
                 values = scorer.predict(sentences=sentences, sampled_passages=samples)
         return [float(v) for v in np.asarray(values).reshape(-1)]
+
+    def _bertscore(self, sentences: List[str], samples: List[str]):
+        """Keep upstream's result except for its empty short-sentence filter."""
+        if not samples or not sentences:
+            raise ValueError("BERTScore requires sentences and evidence samples")
+        scorer = self._scorers["bertscore"]
+        # Test doubles without spaCy continue through the public upstream API.
+        if not hasattr(scorer, "nlp"):
+            return scorer.predict(sentences=sentences, sampled_passages=samples)
+        normal, short = [], []
+        for sample in samples:
+            spans = list(scorer.nlp(sample).sents)
+            if any(len(span) > 3 for span in spans):
+                normal.append(sample)
+            else:
+                texts = [span.text.strip() for span in spans if span.text.strip()]
+                if not texts:
+                    raise ValueError("BERTScore sample contains no nonempty sentences")
+                short.append(texts)
+        if not short:
+            return scorer.predict(sentences=sentences, sampled_passages=samples)
+        total = np.zeros(len(sentences), dtype=float)
+        if normal:
+            total += np.asarray(scorer.predict(sentences=sentences, sampled_passages=normal)) * len(normal)
+        import selfcheckgpt.modeling_selfcheck as upstream
+        for texts in short:
+            refs = [sentence for sentence in sentences for _ in texts]
+            cands = texts * len(sentences)
+            _, _, f1 = upstream.bert_score.score(
+                cands, refs, lang=scorer.default_model, verbose=False,
+                rescale_with_baseline=scorer.rescale_with_baseline)
+            # Same best-match and 1-F1 calculation as upstream predict().
+            best = f1.reshape(len(sentences), len(texts)).max(axis=1).values.numpy()
+            total += 1.0 - best
+        return total / len(samples)
 
     def detect(
         self,
@@ -200,9 +245,8 @@ class SelfCheckGPTDetector:
             )
         samples = self.bank.get(generator, question, context)
         sentences = self._sentences(answer)
-        # Each scorer fails on its own: e.g. upstream SelfCheckBERTScore
-        # raises IndexError when every sample is 3 tokens or shorter (it
-        # drops such sample sentences), which must not erase the others.
+        # Preserve other scores if one scorer fails; completeness checks
+        # reject the run, with the original per-scorer reason retained.
         scores, errors, first_values = {}, {}, []
         for method in self.methods:
             try:

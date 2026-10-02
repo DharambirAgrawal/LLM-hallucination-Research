@@ -101,6 +101,8 @@ class ReductionRunner:
             start = time.monotonic()
             try:
                 answer, calls, details = fn()
+                if not isinstance(answer, str) or not answer.strip():
+                    raise ValueError("generator/reducer returned an empty answer")
                 out[name] = {"answer": answer, "n_calls": calls, "details": details, "error": None,
                              "latency_seconds": time.monotonic() - start}
             except Exception as exc:
@@ -205,7 +207,11 @@ class ReductionRunner:
                     if item["answer"] is not None:
                         case = {"case_id": f"{sample.sample_id}:{cond}", "question": sample.question,
                                 "context": sample.context, "answer": item["answer"]}
-                        row.update(self._score(case, model, cond, item, answers))
+                        try:
+                            row.update(self._score(case, model, cond, item, answers))
+                        except Exception as exc:
+                            row["error"] = f"{type(exc).__name__}: {str(exc).strip() or repr(exc)}"
+                            logger.opt(exception=exc).debug("Scoring {} failed for {} ({})", cond, sample.sample_id, model.name)
                     elif item["error"] and not item["error"].startswith("skipped"):
                         first_error = first_error or f"{cond}: {item['error']}"
                     rows.append(row)

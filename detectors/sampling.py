@@ -34,9 +34,9 @@ class SampleBank:
                 samples = generator.sample_n(prompt, n=self.n_samples, temperature=self.temperature)
             else:
                 samples = generator.generate_batch([prompt] * self.n_samples, temperature=self.temperature)
-            samples = [s for s in samples if s.strip()]
-            if not samples:
-                raise RuntimeError("Generator returned no samples")
+            if len(samples) != self.n_samples or any(not isinstance(s, str) or not s.strip() for s in samples):
+                raise RuntimeError(f"Generator must return {self.n_samples} nonempty samples; "
+                                   f"received {len(samples)} samples (including any empty responses)")
             self._samples[key] = samples
         return self._samples[key]
 

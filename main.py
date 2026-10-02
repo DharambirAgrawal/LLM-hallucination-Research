@@ -10,6 +10,7 @@ a worker per detector group per run. Flow and diagrams: docs/ARCHITECTURE.md.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from datetime import datetime, timezone
@@ -332,9 +333,11 @@ def run_once(run_dir: Path, run_label: str, config: dict, runner, datasets, gene
     from benchmark.reduction_runner import ReductionRunner
     from reporting import generate
     from utils.run_manifest import write_run_files
+    from utils.completeness import inspect_scores
 
     started_at = datetime.now(timezone.utc)
     stage_seconds: dict[str, float] = {}
+    coverage = {}
     run_dir.mkdir(parents=True, exist_ok=True)
     runner.output_dir = run_dir
     run_config = {**config, "benchmark": {**config["benchmark"], "output_dir": str(run_dir)}}
@@ -344,6 +347,16 @@ def run_once(run_dir: Path, run_label: str, config: dict, runner, datasets, gene
     stage_start = time.monotonic()
     raw = runner.validate(datasets, generators=generators or None)
     stage_seconds["detector_validation"] = time.monotonic() - stage_start
+    score_columns = [f"{col}_score" for fam in runner.families.values() for col in fam.columns]
+    cases = [case for group in datasets.values() for case in DatasetLoader.detection_cases(group)]
+    n_cases = len(cases)
+    n_validation_models = len(generators) if runner.generator_columns() else 1
+    validation_keys = ([(case['case_id'], g.name) for case in cases for g in generators]
+                       if runner.generator_columns() else [(case['case_id'],) for case in cases])
+    validation_key_columns = ("case_id", "model") if runner.generator_columns() else ("case_id",)
+    coverage["detector_validation"] = inspect_scores(raw.to_dict("records"), score_columns,
+                                                     n_cases * n_validation_models,
+                                                     validation_key_columns, validation_keys)
 
     summary = summarise(raw, runner)
     if summary.empty or not (summary["n_cases"] > 0).any():
@@ -360,7 +373,15 @@ def run_once(run_dir: Path, run_label: str, config: dict, runner, datasets, gene
         console.section(f"{run_label} · Stage 2/2 · Reduction "
                         f"(baseline vs. {', '.join(config['reduction'].get('methods', []))})")
         stage_start = time.monotonic()
-        reduction = ReductionRunner(run_config, runner).run(datasets, generators)
+        reducer = ReductionRunner(run_config, runner)
+        reduction = reducer.run(datasets, generators)
+        n_conditions = len(reducer.conditions())
+        n_questions = sum(len(group) for group in datasets.values())
+        coverage["reduction"] = inspect_scores(reduction.to_dict("records"), score_columns,
+                                               n_questions * len(generators) * n_conditions,
+                                               ("sample_id", "model", "condition"),
+                                               [(sample.sample_id, g.name, cond) for group in datasets.values()
+                                                for sample in group for g in generators for cond in reducer.conditions()])
         stage_seconds["reduction"] = time.monotonic() - stage_start
         console.section(f"{run_label} · Reduction results")
         print_reduction(reduction, runner)
@@ -370,20 +391,31 @@ def run_once(run_dir: Path, run_label: str, config: dict, runner, datasets, gene
             source = score_reduction_from / run_name / "reduction_comparison.csv"
         console.section(f"{run_label} · Stage 2/2 · Scoring the reduction answers of {source.parent}")
         stage_start = time.monotonic()
-        score_reduction_answers(source, run_dir / "reduction_scores.csv", runner, datasets)
+        scored = score_reduction_answers(source, run_dir / "reduction_scores.csv", runner, datasets)
+        source_answers = pd.read_csv(source)
+        coverage["reduction_scoring"] = inspect_scores(scored.to_dict("records"), score_columns,
+                                                       len(source_answers), ("sample_id", "model", "condition"),
+                                                       list(source_answers[["sample_id", "model", "condition"]].itertuples(index=False, name=None)))
         stage_seconds["reduction_scoring"] = time.monotonic() - stage_start
 
     if runner.generator_columns():
         runner.bank.export(run_dir / "selfcheckgpt_samples.jsonl")
+    coverage["passed"] = all(stage["passed"] for stage in coverage.values())
+    (run_dir / "score_completeness.json").write_text(json.dumps(coverage, indent=2), encoding="utf-8")
     write_run_files(run_dir, run_config, sys.argv, datasets, generators, started_at, stage_seconds)
     if make_report:
         produced = generate(run_dir, title=f"{run_dir.parent.name}/{run_dir.name}")
         if "report (docx)" not in produced:
             raise RuntimeError(f"Report for {run_label} did not produce report.docx")
+    if not coverage["passed"]:
+        raise SystemExit(f"Incomplete scores in {run_label}; this run FAILED. "
+                         f"See {run_dir / 'score_completeness.json'} and run.log. "
+                         "Recorded results are retained for diagnosis.")
+    console.line(f"✓ {run_label} · every expected score is present and finite")
     return stage_seconds
 
 
-def score_reduction_answers(source: Path, output: Path, runner, datasets) -> None:
+def score_reduction_answers(source: Path, output: Path, runner, datasets) -> pd.DataFrame:
     """Score another environment's reduction answers with this run's
     (generator-independent) detectors, keyed by sample, model, condition."""
     if not source.is_file():
@@ -404,8 +436,10 @@ def score_reduction_answers(source: Path, output: Path, runner, datasets) -> Non
                 "context": sample.context, "answer": item.answer}
         rows.append({**key, **runner.score_answer(case, None)})
     bar.close()
-    pd.DataFrame(rows).to_csv(output, index=False)
+    frame = pd.DataFrame(rows)
+    frame.to_csv(output, index=False)
     console.line(f"✓ scored {len(rows)} reduction answers → {output.name}")
+    return frame
 
 
 def main() -> None:

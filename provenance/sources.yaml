@@ -20,7 +20,12 @@ sources:
       LLM-prompt scorer, pointed at a local Ollama judge through its
       OpenAI-compatible endpoint). Samples come from the local Ollama
       generators. SelfCheckNLI needs sentencepiece, which the package does
-      not declare (added to requirements.txt).
+      not declare (added to requirements.txt). BERTScore has a documented
+      short-sentence preprocessing repair: retain nonempty short sentences
+      only if upstream's >3-token filter leaves a sampled passage empty,
+      applying its same best-sentence F1 and sample averaging formula.
+      Normal inputs use the official scorer unchanged. The repair is
+      recorded in reports and run manifests; no samples are redrawn or dropped.
 
   uqlm:
     kind: detector

@@ -132,6 +132,7 @@ def write_run_files(
             "generator_samples": "fresh_each_run",
             "preflight_samples": "discarded",
             "shared_inputs": "fixed_questions_and_labeled_answers",
+            "selfcheck_bertscore_short_samples": "retain_nonempty_sentences_if_upstream_filter_is_empty",
         },
         "command": " ".join(argv),
         "git": {
@@ -146,6 +147,9 @@ def write_run_files(
         "models": model_entries,
         "seed": config.get("benchmark", {}).get("seed"),
     }
+    completeness = output_dir / "score_completeness.json"
+    if completeness.is_file():
+        manifest["score_completeness"] = json.loads(completeness.read_text(encoding="utf-8"))
     path = output_dir / "run_manifest.json"
     path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 

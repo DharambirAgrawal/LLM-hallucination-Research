@@ -55,16 +55,21 @@ hallucinated**.
 - `SelfCheckNLI` needs `sentencepiece`, which the package does not declare
   (found by running it; added to `requirements.txt`).
 - Upstream `SelfCheckBERTScore` drops sample sentences of 3 tokens or fewer
-  and raises `IndexError` when none remain (short answers, e.g. HaluEval QA,
-  DROP). Each scorer fails on its own; the failure is recorded per case and
-  counted per dataset in the report.
+  and raises `IndexError` when none remain. The adapter retains the nonempty
+  short sentences **only when that filter would leave a sample empty**, using
+  the same best-sentence F1, 1−F1, and mean-over-samples formula. Normal samples
+  still use upstream unchanged. No evidence is resampled, discarded, or padded.
+  This edge-case preprocessing repair is explicitly recorded as an adaptation
+  in the report and run manifest. Other scorer failures remain recorded and
+  cause a nonzero run exit; missing scores are never imputed.
 - Upstream `SelfCheckBERTScore` calls `bert_score.score(...)` once per
   sample, which reloads roberta-large every call and always places it on the
   GPU (no device is passed). Next to Ollama on the same GPU this caused
   intermittent "CUDA out of memory". The adapter routes that one call to the
   same library's `bert_score.BERTScorer`, built with the same arguments (same
   model, layer, baseline file, idf off, batch size 64) and kept loaded on the
-  configured device. The scoring code and the numbers are unchanged.
+  configured device. This model-loading change preserves the scores; the
+  separate short-sentence repair above changes only the formerly crashing inputs.
 
 ### UQLM (Bouchard et al., 2025)
 

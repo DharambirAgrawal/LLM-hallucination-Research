@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import importlib.util
+import ast
+import json
 import re
 import sys
 import tempfile
@@ -180,6 +182,8 @@ class ReportChartTests(unittest.TestCase):
                     self.assertIn("fake-model · SummaC", html)
                     self.assertIn("second-model · MiniCheck", html)
                     self.assertIn("second-model · SummaC", html)
+                    self.assertIn("2 generator models (fake-model, second-model)",
+                                  result["takeaways"].read_text(encoding="utf-8"))
                     self.assertEqual(len(list(result["charts"].glob("answer_scores_*.png"))), 6)
                     scores = pd.read_csv(result["tables"] / "answer_scores_by_model.csv")
                     self.assertEqual(len(scores), 12)  # 2 detectors × 2 models × 3 conditions
@@ -190,12 +194,137 @@ class ReportChartTests(unittest.TestCase):
                     self.assertTrue((result["charts"] / "baseline_vs_methods.png").is_file())
                     for run in runs:
                         run.manifest = {"run_protocol": {"detector_scores": "recomputed_each_run",
-                            "generator_samples": "fresh_each_run", "preflight_samples": "discarded"}}
+                            "generator_samples": "fresh_each_run", "preflight_samples": "discarded"},
+                            "score_completeness": {"passed": True}}
                     self.build.generate(Path(temp), Path(temp) / "combined")
                     html = re.sub("src='data:image/png;base64,[^']*'", "",
                                   result["report (html)"].read_text(encoding="utf-8"))
                     self.assertIn("all detector scores were recomputed", html)
                     self.assertNotIn("Run independence is unverified", html)
+                    self.assertIn("All expected answer rows and finite detector scores passed", html)
+
+    def test_complete_smoke_matrix_from_real_csvs_and_group_merges(self):
+        """Full configured dimensions, real CSV loading/joins/plots/HTML.
+
+        Model scores are synthetic; metrics are supplied for known perfectly
+        separated labels. This tests report integrity, not live detectors or DOCX.
+        """
+        root = Path(__file__).resolve().parents[1]
+        models = ["llama3.2-3b", "qwen2.5-7b", "deepseek-r1-7b", "gemma3-4b", "gpt-oss-20b"]
+        detector_keys = [key for key in self.build.PRETTY if key != "uqlm_exact_match"]
+        gen_keys = [key for key in detector_keys if self.build.family_of(key) in ("selfcheckgpt", "uqlm")]
+        groups = {"core": gen_keys + ["uqlm_judge"], "minicheck": ["minicheck"],
+                  "summac": ["summac"], "alignscore": ["alignscore"]}
+        conditions = list(self.build.METHOD_PRETTY)
+        reductions = {"baseline": .6, "closed_book": .8, "greedy": .4,
+                      "self_refine_adapted": .3, "cove_adapted": .35, "uqlm_best_response": .25}
+        # Use the actual paired_deltas function without importing its model dependencies.
+        tree = ast.parse((root / "benchmark/reduction_runner.py").read_text())
+        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "paired_deltas")
+        namespace = {"pd": pd, "List": list}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), "paired_deltas", "exec"), namespace)
+        reduction_module = types.ModuleType("benchmark.reduction_runner")
+        reduction_module.paired_deltas = namespace["paired_deltas"]
+        validator_module = types.ModuleType("benchmark.detector_validation")
+
+        class KnownLabelMetrics:
+            def evaluate(self, labels, scores, threshold):
+                self_labels, self_scores = list(labels), list(scores)
+                if not all(int(score >= threshold) == label for score, label in zip(self_scores, self_labels)):
+                    raise AssertionError("Fixture labels must be perfectly separated")
+                return {"n_cases": len(self_labels), "threshold": threshold,
+                        **{metric: 1. for metric in ("roc_auc", "average_precision", "accuracy", "precision", "recall", "f1")}}
+
+        validator_module.DetectorValidator = KnownLabelMetrics
+        with patch.dict(sys.modules, {"yaml": types.ModuleType("yaml"), "benchmark": types.ModuleType("benchmark"),
+                "benchmark.detector_validation": validator_module, "benchmark.reduction_runner": reduction_module}):
+            spec = importlib.util.spec_from_file_location("aggregate_matrix_test", root / "reporting/aggregate.py")
+            aggregate = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = aggregate
+            spec.loader.exec_module(aggregate)
+            spec = importlib.util.spec_from_file_location("document_matrix_test", root / "reporting/document.py")
+            document = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = document
+            spec.loader.exec_module(document)
+            self.build.agg, self.build.Report = aggregate, document.Report
+            with tempfile.TemporaryDirectory() as temp:
+                parent = Path(temp)
+                for run_index in (1, 2):
+                    run = f"run_{run_index:02d}"
+                    for group, keys in groups.items():
+                        folder = parent / run / group
+                        folder.mkdir(parents=True)
+                        raw, summary, answers = [], [], []
+                        for model in models if group == "core" else [None]:
+                            for question in (1, 2):
+                                for label in (0, 1):
+                                    row = {"case_id": f"q{question}:{label}", "sample_id": f"q{question}",
+                                           "dataset": "qa", "question": f"Question {question}",
+                                           "context": "context", "answer": "answer", "label": label}
+                                    if model is not None:
+                                        row["model"] = model
+                                    for key in keys:
+                                        row[f"{key}_score"] = (2. + 2. * label) if key == "selfcheckgpt_ngram" else .1 + .8 * label
+                                    raw.append(row)
+                        for key in keys:
+                            for model in models if key in gen_keys else [aggregate.MODEL_INDEPENDENT]:
+                                summary.append({"detector": key, "model": model, "n_cases": 4, "n_failed": 0,
+                                    "threshold": 3. if key == "selfcheckgpt_ngram" else .5,
+                                    **{metric: 1. for metric in aggregate.METRICS}})
+                        for model in models:
+                            for question in (1, 2):
+                                for condition in conditions:
+                                    row = {"sample_id": f"q{question}", "model": model, "condition": condition}
+                                    if group == "core":
+                                        row.update(dataset="qa", question=f"Question {question}", answer="answer", error=None)
+                                    for key in keys:
+                                        value = reductions[condition]
+                                        if key == "selfcheckgpt_ngram":
+                                            value *= 4  # native unbounded score, not a probability
+                                        row[f"{key}_score"] = value
+                                    if group == "core" and condition == "cove_adapted":
+                                        row["selfcheckgpt_bertscore_score"] = np.nan
+                                        row["selfcheckgpt_error"] = "partial: bertscore: synthetic missing score"
+                                    answers.append(row)
+                        pd.DataFrame(raw).to_csv(folder / "detector_validation_raw.csv", index=False)
+                        pd.DataFrame(summary).to_csv(folder / "detector_validation_summary.csv", index=False)
+                        pd.DataFrame(answers).to_csv(folder / ("reduction_comparison.csv" if group == "core" else "reduction_scores.csv"), index=False)
+                        manifest = {"run_protocol": {"detector_scores": "recomputed_each_run",
+                            "generator_samples": "fresh_each_run", "preflight_samples": "discarded",
+                            "selfcheck_bertscore_short_samples": "retain_nonempty_sentences_if_upstream_filter_is_empty"},
+                            "score_completeness": {"passed": group != "core"},
+                            "datasets": [{"name": "qa", "n_samples": 2}],
+                            "models": [{"name": name, "model": name} for name in models] if group == "core" else []}
+                        (folder / "run_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+                # Run reports and combined reports must have the same complete matrix.
+                with patch.object(document.Report, "to_docx", return_value=parent / "excluded.docx"):
+                    for input_dir, output_dir, expected_runs in (
+                            (parent / "run_01", parent / "run_01", 1), (parent, parent / "combined", 2)):
+                        result = self.build.generate(input_dir, output_dir)
+                        html = re.sub("src='data:image/png;base64,[^']*'", "", result["report (html)"].read_text())
+                        self.assertEqual(len(list(result["charts"].glob("answer_scores_*.png"))), 13 * 6)
+                        scores = pd.read_csv(result["tables"] / "answer_scores_by_model.csv")
+                        self.assertEqual(len(scores), 13 * 5 * 6)
+                        self.assertEqual(set(scores["detector"]), set(detector_keys))
+                        self.assertEqual(set(scores["model"]), set(models))
+                        for model in models:
+                            for detector in detector_keys:
+                                self.assertIn(f"{model} · {self.build.pretty(detector)}", html)
+                        matched = pd.read_csv(result["tables"] / "matched_comparisons.csv")
+                        self.assertTrue((matched["pairs"] == 10).all())
+                        self.assertTrue((matched["questions"] == 2).all())
+                        self.assertTrue((matched["observations"] == 10 * expected_runs).all())
+                        self.assertAlmostEqual(matched.loc[matched["detector"] == "minicheck", "improvement"].max(), .35)
+                        missing = scores[(scores["detector"] == "selfcheckgpt_bertscore") & (scores["condition"] == "cove_adapted")]
+                        self.assertTrue(missing["mean_risk"].isna().all())
+                        self.assertTrue((missing["pairs"] == 0).all())
+                        self.assertTrue((missing["missing_scores"] == 2 * expected_runs).all())
+                        self.assertNotIn("Run independence is unverified", html)
+                        self.assertNotIn("Nothing failed", html)
+                        self.assertIn("FAILED · incomplete scores", html)
+                        self.assertIn("edge-case preprocessing is an adaptation", html)
+                        self.assertIn("5 generator models", result["takeaways"].read_text())
+                        self.assertFalse(any("latency" in path.name for path in result["charts"].glob("*.png")))
 
 
 if __name__ == "__main__":
