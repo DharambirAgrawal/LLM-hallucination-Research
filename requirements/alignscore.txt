@@ -3,4 +3,7 @@
 # downloaded and checksum-verified by the run itself (utils/resources.py).
 -r base.txt
 alignscore @ git+https://github.com/yuh-zha/AlignScore.git@a0936d5afee642a46b22f6c02a163478447aa493
+# Upstream imports AdamW from transformers' top-level namespace. Its loose
+# transformers<5 constraint admits newer releases that removed that export.
+transformers==4.37.2
 en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl

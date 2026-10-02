@@ -46,8 +46,8 @@ class AlignScoreDetector:
             from alignscore import AlignScore
         except ImportError as exc:
             raise RuntimeError(
-                "AlignScore is not installed. See METHOD_SOURCES.md for the "
-                "upstream installation instructions."
+                f"AlignScore could not import: {exc}. Check the isolated "
+                "environment against requirements/alignscore.txt."
             ) from exc
         self._model = AlignScore(
             model=self.model_name,
