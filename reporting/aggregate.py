@@ -3,8 +3,8 @@
 A *run folder* is what one `main.py` repetition writes (run_01, run_02, …):
 detector_validation_summary.csv, detector_validation_raw.csv, optionally
 reduction_comparison.csv, run_manifest.json and config_used.yaml. A
-scripts/run_full.py output holds one run folder per detector and run
-(<detector>/run_01 …). Every run folder found under the input is used,
+scripts/run_full.py output holds one folder per run and detector group
+(run_01/<group>/ …). Every run folder found under the input is used,
 except anything inside a `combined/` folder (those are outputs).
 
 Across runs, each metric is reported as mean ± std (sample std, n-1). Only

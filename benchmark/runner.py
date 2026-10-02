@@ -7,7 +7,7 @@ hallucinated in every column):
     selfcheckgpt   selfcheckgpt_<ngram|bertscore|nli|prompt>
     uqlm           uqlm_<semantic_negentropy|noncontradiction|entailment|
                          cosine_sim|bert_score>  (exact_match opt-in)
-  generator-independent (scored once per case, reused by later runs):
+  generator-independent (scored once per case in each run):
     uqlm_judge     uqlm_judge
     minicheck      minicheck
     summac         summac
@@ -106,9 +106,6 @@ class BenchmarkRunner:
         self._build(config.get("detectors", {}), self._judge, self._host)
         for name in list(self.families):
             self._guard(name)
-        # Scores of deterministic, generator-independent detectors, reused
-        # by later runs instead of recomputing identical numbers.
-        self._fixed_scores: Dict[str, dict] = {}
 
     # ── construction ────────────────────────────────────────────────────
     def _build(self, cfgs: dict, judge: dict, host: str) -> None:
@@ -285,8 +282,8 @@ class BenchmarkRunner:
     ) -> pd.DataFrame:
         """Score fixed labeled answers and preserve every failure.
 
-        Generator-independent detectors score each case once (and reuse the
-        scores in later runs; they are deterministic). The sampling-based
+        Generator-independent detectors score each case once per invocation;
+        no scores are carried between runs. The sampling-based
         detectors then run one model at a time over every case, so Ollama
         keeps a single model loaded; a `model` column tags those rows.
         """
@@ -305,23 +302,7 @@ class BenchmarkRunner:
 
         base_rows = [dict(case) for case in cases]
         for fam in fixed_families:
-            # Successful scores are reused by later runs (deterministic);
-            # failed cases are scored again, so a transient error in run 1
-            # (e.g. an Ollama timeout for the judge) is not frozen in.
-            cached = self._fixed_scores.setdefault(fam.name, {})
-            todo = [row for row in base_rows if row["case_id"] not in cached]
-            for row in base_rows:
-                if row["case_id"] in cached:
-                    row.update(cached[row["case_id"]])
-            if not todo:
-                console.line(f"✓ {fam.name} · reused first-run scores (deterministic, generator-independent)")
-                continue
-            self._score_all(todo, [fam], fam.name if len(todo) == len(base_rows)
-                            else f"{fam.name} (retry {len(todo)})", None)
-            keys = [f"{c}_score" for c in fam.columns] + [f"{fam.name}_error"]
-            for row in todo:
-                if not row.get(f"{fam.name}_error"):
-                    cached[row["case_id"]] = {k: row[k] for k in keys}
+            self._score_all(base_rows, [fam], fam.name, None)
 
         if not gen_families:
             rows = base_rows

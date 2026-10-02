@@ -97,9 +97,9 @@ hallucinated**.
   in the config (a different model family than every generator).
 - UQLM returns confidence; every value is reported as `1 − confidence`.
 - Generator-independent detectors (the UQLM judge, MiniCheck, SummaC,
-  AlignScore) score each fixed answer once and later runs reuse those
-  scores, so their run-to-run std is 0 by construction (the judge runs at
-  temperature 0).
+  AlignScore) score each fixed answer again in every run; no previous run's
+  scores are reused. Deterministic detectors may give identical scores on
+  identical inputs, but zero run-to-run std is measured, not imposed by a cache.
 
 ### MiniCheck (Tang et al., EMNLP 2024)
 

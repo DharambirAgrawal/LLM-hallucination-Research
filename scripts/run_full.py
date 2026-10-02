@@ -23,7 +23,8 @@ SelfCheckGPT, UQLM and the judge share the generator samples and run in the
 "core" environment (requirements.txt), which also runs the reduction methods;
 the other groups then score those reduction answers too. Each group writes
 its part of every run into run_XX/<group>/, and this script builds each
-run's report and the combined report from all of them.
+run's report as soon as every group finishes that run, before starting the
+next run. The combined report is written after the last run.
 
 Two phases. Phase 1 installs every environment, downloads everything and
 runs each group's preflight (one real question through the whole pipeline).
@@ -194,6 +195,8 @@ def main() -> None:
     if args.smoke or args.smoke_2q:
         args.runs = args.runs if args.runs is not None else 2
     runs = args.runs if args.runs is not None else plan.get("runs", 1)
+    if runs < 1:
+        raise SystemExit("--runs must be at least 1")
     selected = args.detectors or plan.get("detectors") or list(ALL_DETECTORS)
     groups = {name: [d for d in env["detectors"] if d in selected] for name, env in ENVIRONMENTS.items()}
     groups = {name: dets for name, dets in groups.items() if dets}
@@ -229,9 +232,11 @@ def main() -> None:
         console.kv("generator calls", f"up to {generator_calls:,} across all runs "
                    "(judge calls and preflight additional)")
 
-    def main_args(name: str) -> list[str]:
+    def main_args(name: str, run_index: int | None = None) -> list[str]:
         cmd = ["--config", args.config, "--detectors", *groups[name],
                "--output", str(output_dir), "--part", name, "--runs", str(runs)]
+        if run_index is not None:
+            cmd += ["--run-index", str(run_index)]
         if args.smoke_2q:
             cmd.append("--smoke-2q")
         elif args.smoke:
@@ -276,61 +281,83 @@ def main() -> None:
         console.line("To share the errors for help: python scripts/share_logs.py --upload")
         raise SystemExit(1)
 
-    # Phase 2: the runs. core first: the other groups score its reduction answers.
+    # Complete all groups for one run, publish its reports, then start the next.
+    # Only one environment is loaded at a time. Each run recomputes every
+    # detector's scores and draws fresh generator samples.
     console.header("Phase 2/2 · Runs (every detector group passed its checks)")
     results = []
-    core_ok = True
-    for index, name in enumerate(groups, 1):
-        print(f"\n\n{'#' * console.WIDTH}\n#  [{index}/{total}] {name}: all {runs} runs\n{'#' * console.WIDTH}",
-              file=sys.stderr, flush=True)
-        # Phase 1 already ran this group's full preflight in a subprocess.
-        # Repeating it here reloads every model and reruns every method.
-        cmd = [*main_args(name), "--skip-preflight"]
-        if name != "core" and reduce_on and core_ok:
-            cmd += ["--score-reduction-from", str(output_dir)]
-        group_started = time.monotonic()
-        code = subprocess.run([str(pythons[name]), "main.py", *cmd], cwd=ROOT, env=env).returncode
-        seconds = time.monotonic() - group_started
-        if code == 0:
-            results.append((name, "ok", seconds))
-        else:
-            results.append((name, f"failed (exit {code}) — see {log_dir / f'{name}.log'}", seconds))
-            if name == "core" and reduce_on:
-                core_ok = False
-                console.line("⚠ core failed: the other groups run Stage A only "
-                             "(there are no reduction answers to score)")
-
-    # Reports: one per run (every detector group together), then combined.
     produced = {}
     report_failures = []
+    if not args.skip_report:
+        from reporting import generate
+    for run_index in range(1, runs + 1):
+        run_name = f"run_{run_index:02d}"
+        run_dir = output_dir / run_name
+        console.header(f"Run {run_index}/{runs} · every detector group → {run_dir}")
+        core_ok = True
+        run_ok = False
+        failed_groups = []
+        for index, name in enumerate(groups, 1):
+            console.section(f"{run_name} · [{index}/{total}] {name}")
+            # Phase 1 already checked this group; run only this repetition.
+            cmd = [*main_args(name, run_index), "--skip-preflight"]
+            if name != "core" and reduce_on and core_ok:
+                cmd += ["--score-reduction-from", str(output_dir)]
+            group_started = time.monotonic()
+            code = subprocess.run([str(pythons[name]), "main.py", *cmd], cwd=ROOT, env=env).returncode
+            seconds = time.monotonic() - group_started
+            label = f"{run_name}/{name}"
+            if code == 0:
+                results.append((label, "ok", seconds))
+                run_ok = True
+            else:
+                results.append((label, f"failed (exit {code}) — see {log_dir / f'{name}.log'}", seconds))
+                failed_groups.append(name)
+                if name == "core" and reduce_on:
+                    core_ok = False
+                    console.line("⚠ core failed in this run: the other groups run Stage A only "
+                                 "(there are no complete reduction answers to score)")
+
+        if not args.skip_report:
+            console.section(f"{run_name} · Reports")
+            if run_ok:
+                try:
+                    title = f"{output_dir.name} · {run_name}"
+                    if failed_groups:
+                        title += f" · incomplete (failed groups: {', '.join(failed_groups)})"
+                    report_files = generate(run_dir, title=title)
+                    if any(key not in report_files for key in ("report (docx)", "report (html)")):
+                        raise RuntimeError("Word or HTML report was not produced")
+                    console.line(f"✓ {run_name} reports ready" + (" (incomplete detector coverage)" if failed_groups else ""))
+                    console.kv("Word", report_files["report (docx)"])
+                    console.kv("HTML", report_files["report (html)"])
+                except (Exception, SystemExit) as exc:
+                    console.line(f"✗ {run_name}: report failed: {exc}")
+                    report_failures.append(run_name)
+            else:
+                console.line(f"✗ {run_name}: no detector group succeeded; no report available")
+                report_failures.append(run_name)
+
+    # The combined report is generated only after the last run's reports.
     ran = [name for name, status, _ in results if status == "ok"]
     if ran and not args.skip_report:
-        from reporting import generate
-        console.header("Reports")
-        for index in range(1, runs + 1):
-            run_dir = output_dir / f"run_{index:02d}"
-            if run_dir.is_dir():
-                try:
-                    report_files = generate(run_dir, title=f"{output_dir.name} · {run_dir.name}")
-                    if "report (docx)" not in report_files:
-                        raise RuntimeError("report.docx was not produced")
-                    console.line(f"✓ {run_dir.name}/report.docx")
-                except Exception as exc:
-                    console.line(f"✗ {run_dir.name}: report failed: {exc}")
-                    report_failures.append(run_dir.name)
+        console.header("Combined report · all runs")
         try:
+            title = f"{output_dir.name} · combined over {runs} runs"
+            if any(status != "ok" for _, status, _ in results):
+                title += " · incomplete detector coverage"
             produced = generate(output_dir, out_dir=output_dir / "combined",
-                                title=f"{output_dir.name} · combined over {runs} runs")
-            if "report (docx)" not in produced:
-                raise RuntimeError("report.docx was not produced")
+                                title=title)
+            if any(key not in produced for key in ("report (docx)", "report (html)")):
+                raise RuntimeError("Word or HTML report was not produced")
             console.line("✓ combined/report.docx")
-        except Exception as exc:
+        except (Exception, SystemExit) as exc:
             console.line(f"✗ combined: report failed: {exc}")
             report_failures.append("combined")
 
     console.header(f"Finished in {console.duration(time.monotonic() - started)}")
     for name, status, seconds in results:
-        console.line(f"{'✓' if status == 'ok' else '✗'} {name:<11} {console.duration(seconds):>9}   {status}")
+        console.line(f"{'✓' if status == 'ok' else '✗'} {name:<20} {console.duration(seconds):>9}   {status}")
     if any(status != "ok" for _, status, _ in results):
         console.line("To share the errors for help: python scripts/share_logs.py --upload")
     if not ran:

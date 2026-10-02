@@ -4,8 +4,8 @@
 Setup (download + verify everything) → preflight (one real question through
 every detector, model and reduction method) → run_01 … run_N (Stage A:
 detector validation on labeled answers; Stage B: reduction methods vs. the
-baseline answer) → per-run and combined reports. scripts/run_full.py runs
-this once per detector environment. Flow and diagrams: docs/ARCHITECTURE.md.
+baseline answer) → per-run and combined reports. scripts/run_full.py starts
+a worker per detector group per run. Flow and diagrams: docs/ARCHITECTURE.md.
 """
 from __future__ import annotations
 
@@ -51,6 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--part", help=argparse.SUPPRESS,   # used by scripts/run_full.py: write run_XX/<part>/
     )
+    parser.add_argument("--run-index", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
         "--runs", type=int,
         help="Independent repeats (run.runs): run_01 … run_N, then combined/ with mean ± std",
@@ -425,7 +426,10 @@ def main() -> None:
     plan = apply_plan(config, args)
     output_dir = Path(config["benchmark"].get("output_dir", "results/current"))
     part = args.part   # set by scripts/run_full.py: this process fills run_XX/<part>/
-    pattern = f"run_[0-9]*/{part}" if part else "run_[0-9]*"
+    if args.run_index is not None and (not part or not 1 <= args.run_index <= plan["runs"]):
+        raise SystemExit("--run-index requires --part and an index between 1 and --runs")
+    pattern = (f"run_{args.run_index:02d}/{part}" if args.run_index is not None else
+               f"run_[0-9]*/{part}" if part else "run_[0-9]*")
     old_runs = sorted(output_dir.glob(pattern)) if output_dir.is_dir() else []
     if old_runs and not (args.dry_run or args.preflight):
         raise SystemExit(
@@ -588,19 +592,20 @@ def main() -> None:
                  "elapsed<remaining time.")
 
     # ── Runs ────────────────────────────────────────────────────────────
-    for index in range(1, n_runs + 1):
+    indices = [args.run_index] if args.run_index is not None else range(1, n_runs + 1)
+    for index in indices:
         run_name = f"run_{index:02d}"
         run_dir = output_dir / run_name / part if part else output_dir / run_name
         run_label = f"Run {index}/{n_runs}"
         console.header(f"{run_label} → {run_dir}")
-        if index > 1:
-            runner.bank.reset()  # every run draws its own samples
+        runner.bank.reset()  # fresh samples, including after a standalone preflight
         run_once(run_dir, run_label, config, runner, datasets, generators, reduce_on, score_from,
                  run_name=run_name, make_report=not part)
 
     if part:   # scripts/run_full.py builds each run's report and the combined one
         console.section(f"Done in {console.duration(time.monotonic() - started)}")
-        console.line(f"{part}: {n_runs} run(s) written to {output_dir}/run_XX/{part}/")
+        console.line(f"{part}: {len(indices)} run(s) written to {output_dir}/"
+                     + (f"run_{args.run_index:02d}/{part}/" if args.run_index is not None else f"run_XX/{part}/"))
         return
 
     # ── Combined ────────────────────────────────────────────────────────

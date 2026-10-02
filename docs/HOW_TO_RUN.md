@@ -252,8 +252,10 @@ python scripts/run_full.py --runs 5    # or: 5 independent runs
 ```
 
 Every run is the same experiment on the same data (same questions, same
-detectors, same methods); only the models' own sampling differs, so the
-combined report can show how consistent each result is.
+detectors, same methods). Every detector is called again; no previous run's
+scores are reused. Generator samples and baseline/reduction answers are
+generated afresh. The combined report shows how consistent each result is
+under repeated execution on this fixed dataset.
 
 Why detector groups: MiniCheck, SummaC and AlignScore pin conflicting
 `torch`/`transformers` versions upstream, so each gets its own
@@ -263,8 +265,9 @@ SelfCheckGPT, UQLM and the judge share the generator samples and run
 together in the **core** group, which is `requirements.txt` (§0.3) and also
 runs the reduction methods; the other groups then score those answers too,
 so every detector judges every method. Each group writes its part of every
-run into `run_XX/<group>/`, and `run_full.py` then builds each run's report
-and the combined one from all groups together.
+run into `run_XX/<group>/`. After all groups finish run 1, `run_full.py` writes
+`run_01/report.docx` and `run_01/report.html` before starting run 2. It repeats
+this for every run and writes the combined report at the end.
 
 It runs in two phases:
 
@@ -274,7 +277,9 @@ It runs in two phases:
   nothing long has started. Rerun the same command after fixing it;
   environments and downloads are reused.
 - **Phase 2 · runs**: only when every group passed: core first (it produces
-  the reduction answers), then the others, then the reports.
+  the reduction answers), then the others, then that run's reports, then the
+  next run. Each group starts a new worker each run, so detector models are
+  reloaded. Only one detector environment is loaded at a time.
 
 `alignscore` is opt-in (see §3). If one group fails in phase 2, the others
 still run and its line in the final table shows `✗` with the path of its log.
@@ -307,8 +312,9 @@ results/<name>/
 | `tables/*.csv` | every table in the report |
 
 The report reads top to bottom as a research report and explains that higher
-AUROC is better for a detector, while lower risk and a negative method-minus-
-baseline change are better for an answer:
+AUROC is better for a detector, while lower risk is better for an answer.
+Change is method minus baseline (negative is better); improvement is baseline
+minus method (positive is better):
 
 1. **Summary**: the answers in plain sentences (observed detector ranking,
    how each method changed measured risk, and whether the data support a
@@ -319,16 +325,22 @@ baseline change are better for an answer:
    compact table, AUROC per dataset and (with several models) per generator
    model. A detector that gives every answer the same score is flagged as
    "no signal" and never used as a judge.
-4. **Stage B**: matched baseline-versus-method bars and numbers, paired risk
-   changes, per-model comparisons, and an example answer per method. The
+4. **Stage B**: baseline scores before reduction, combined and for each model;
+   upright bars for baseline and every method, plus improvement bars (green
+   positive = lower risk, red negative = worse). Matched baseline-versus-method
+   comparisons, pair counts, missing-score counts, and examples are included. The
    primary detector passes the Stage A AUROC screen on a sufficiently sized
    run. If the screen fails, or the run has fewer than 10 distinct questions,
    results are labeled exploratory. Confidence intervals resample questions
    with their model answers kept together and require at least 10 distinct
    questions and 10 question × model pairs.
-5. **Reliability**: run-to-run variation, failures by cause.
-6. **Appendix**: exactly what ran (models, versions, commit), Stage B as
-   seen by every detector, AUROC per run, and every data file.
+5. **Reliability**: run-to-run variation, failures by cause, and manifest
+   confirmation of score recomputation. Older runs without protocol metadata
+   are marked unverified; regenerating reports does not change their measurements.
+6. **Appendix**: exactly what ran (models, versions, commit), complete before/
+   after and improvement charts and tables for every detector, for all models
+   combined and each model separately, AUROC per run, and every data file. Each
+   detector keeps its own score scale; detector scores are never averaged together.
 
 The full detail (every answer, every score, every table) is in the CSV
 files, not in the document.
@@ -354,9 +366,11 @@ To rebuild reports later: `python scripts/generate_report.py --input
 <run folder>` or `--input <parent> --combined`.
 
 What stays constant and what varies between runs: the questions (seed) are
-the same in every run; the samples and every reduction answer are drawn
-fresh each run, so the std shows how stable each number is under the models'
-own randomness. Within a run, the samples are drawn once per model and
+the same in every run; the samples and every baseline/reduction answer are
+generated afresh and all detector scores are recomputed. Deterministic methods
+may produce identical answers or scores; identical results are allowed and
+are measured again. The std describes repeatability on this fixed data, not
+uncertainty across new datasets. Within a run, the samples are drawn once per model and
 question and every answer to that question is scored against them (the
 labeled answers in Stage A, every method's answer in Stage B). `max_samples`
 picks a seeded random subset of each dataset, and `sample_id` traces back to
@@ -452,7 +466,7 @@ instead of the newest.
 | `--preflight` | ✓ | | Download everything, check the pipeline on one question, print the estimate, stop |
 | `--dry-run` | ✓ | | Show what is present / would be downloaded; download and load nothing |
 | `--score-reduction-from DIR` | ✓ | | Score another environment's reduction answers (used by `run_full.py`) |
-| `--skip-report` | | ✓ | Skip the top-level combined report |
+| `--skip-report` | | ✓ | Skip per-run and combined reports |
 
 Which models run and which datasets are enabled come from `config.yaml`
 (`selected_models`, `datasets[].enabled`).

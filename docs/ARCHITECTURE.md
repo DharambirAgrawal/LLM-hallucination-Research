@@ -9,7 +9,7 @@ each method comes from see [`../METHOD_SOURCES.md`](../METHOD_SOURCES.md).
 ```mermaid
 flowchart LR
     cfg["config.yaml<br/>run plan · models · datasets ·<br/>detectors · reduction methods"]
-    rf["scripts/run_full.py<br/>one process per environment"]
+    rf["scripts/run_full.py<br/>one worker per group per run"]
     main["main.py<br/>one environment, end to end"]
     cfg --> rf --> main
     cfg --> main
@@ -40,8 +40,10 @@ flowchart LR
 
 The official detector packages pin conflicting versions of `torch` and
 `transformers`, so they cannot all live in one Python environment.
-`scripts/run_full.py` therefore runs `main.py` once per environment and
-merges everything at the end.
+`scripts/run_full.py` therefore starts an isolated `main.py` worker per group
+per run. It completes all groups and writes that run's reports before starting
+the next run, then writes the combined report after the last run. The workers
+reload their detector models each run; only one environment is loaded at a time.
 
 ```mermaid
 flowchart TD
@@ -50,7 +52,7 @@ flowchart TD
     p1 -->|any environment fails| stop(["Stop before any long run,<br/>with the reason per environment"])
     p1 -->|all pass| core
 
-    subgraph P2["Phase 2 · the runs (each group fills run_01 … run_N)"]
+    subgraph P2["Phase 2 · complete every group for the current run"]
         core["core (requirements.txt)<br/>SelfCheckGPT · UQLM · UQLM judge<br/>Stage A + Stage B → run_XX/core/"]
         mc["minicheck (.venv-minicheck)<br/>Stage A + scores core's answers → run_XX/minicheck/"]
         su["summac (.venv-summac)<br/>Stage A + scores core's answers → run_XX/summac/"]
@@ -58,8 +60,10 @@ flowchart TD
         core --> mc --> su --> al
     end
 
-    al --> perrun["run_01/ … run_N/<br/>one report per run, every detector"]
-    perrun --> comb["combined/<br/>every run · mean ± std · consistency"]
+    al --> perrun["run_XX/<br/>DOCX + HTML for this run, every detector"]
+    perrun --> more{"More runs?"}
+    more -->|yes: next run| core
+    more -->|no| comb["combined/<br/>every run · mean ± std · consistency"]
 ```
 
 `core` runs first because the other environments score the answers it
@@ -86,7 +90,7 @@ flowchart TD
 ## 4. Stage A: can the detectors be trusted?
 
 Every question comes with answers whose label is known. Detectors that do
-not need a model score each answer once; the sampling-based detectors run one
+not need a generator score each answer once in each run; the sampling-based detectors run one
 model at a time over every answer, so Ollama keeps a single model loaded.
 
 ```mermaid
@@ -119,9 +123,13 @@ flowchart LR
     DEP --> met
 ```
 
-The model-independent scores are deterministic, so later runs reuse the first
-run's scores instead of recomputing them; only the sampling-based detectors
-vary between runs.
+Every detector is called again in every run, including the judge and the
+generator-independent detectors. No detector scores carry over between runs.
+Deterministic detectors may return identical scores on identical inputs;
+those scores are measured again. The questions and labeled answers stay fixed
+for comparison, while generator samples and baseline/reduction answers are
+generated afresh. Within one run, sampling-based detectors share the same
+sample bank so their comparisons use the same evidence.
 
 ## 5. Stage B: do the methods reduce hallucination?
 

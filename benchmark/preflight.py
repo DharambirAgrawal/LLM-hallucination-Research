@@ -8,8 +8,8 @@ with them; with the reduction stage on, every reduction method runs once per
 model and all its answers are scored. If anything fails, the run stops here
 with the reason for each failure, instead of hours later.
 
-The timings give the estimate printed before the long part. Nothing is
-wasted: the samples drawn here are reused when the same question comes up.
+The timings give the estimate printed before the long part. Preflight is a
+separate check: main.py discards its samples before the measured runs.
 """
 from __future__ import annotations
 

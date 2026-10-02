@@ -127,6 +127,12 @@ def write_run_files(
         "finished_at": finished.isoformat(timespec="seconds"),
         "duration_seconds": round((finished - started).total_seconds(), 1),
         "stage_seconds": {k: round(v, 1) for k, v in stage_seconds.items()},
+        "run_protocol": {
+            "detector_scores": "recomputed_each_run",
+            "generator_samples": "fresh_each_run",
+            "preflight_samples": "discarded",
+            "shared_inputs": "fixed_questions_and_labeled_answers",
+        },
         "command": " ".join(argv),
         "git": {
             "commit": _git("rev-parse", "HEAD"),

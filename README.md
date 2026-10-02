@@ -43,7 +43,7 @@ flowchart TD
 ```
 
 `main.py` runs this flow for one Python environment. `scripts/run_full.py`
-runs it once per environment (the detectors' official packages need
+runs a worker per detector group per run (the detectors' official packages need
 conflicting library versions) and then combines everything; details in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -207,8 +207,10 @@ python scripts/run_full.py --runs 5   # the full experiment: 5 independent runs
 ```
 
 The result folder has one complete folder per run (`run_01/`, `run_02/`, …,
-each with its own report and data) and a `combined/` folder with all runs
-together. How big a run is (runs, questions per dataset, detectors, samples,
+each with its own report and data). Each run's DOCX and HTML are written
+before the next run starts; `combined/` is written after the last run.
+Every detector score is recomputed in each run, with fresh generator samples
+and baseline/reduction answers. How big a run is (runs, questions per dataset, detectors, samples,
 reduction rounds) is set in one place: the `run:` block at the top of
 [`config.yaml`](config.yaml).
 
