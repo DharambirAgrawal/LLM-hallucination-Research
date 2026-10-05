@@ -10,10 +10,28 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from utils.runtime_estimate import build_estimate, combine_estimates, reduction_answers_per_question, save_estimate
+from utils.runtime_estimate import build_estimate, combine_estimates, print_estimate, reduction_answers_per_question, save_estimate
 
 
 class RuntimeEstimateTests(unittest.TestCase):
+    def test_total_is_explicit_and_worker_does_not_claim_full_experiment(self):
+        import utils
+        console = types.ModuleType("utils.console")
+        console.duration = lambda seconds: f"{seconds:g}s"
+        for name in ("header", "section", "kv", "line"):
+            setattr(console, name, MagicMock())
+        core = build_estimate({"reduction": 40}, 2, group="core")
+        fixed = build_estimate({"detector_validation": 20}, 2, group="minicheck")
+        total = combine_estimates({"core": core, "minicheck": fixed}, 2)
+        with patch.dict(sys.modules, {"utils.console": console}), patch.object(utils, "console", console, create=True):
+            print_estimate(total, Path("runtime_estimate.json"))
+            console.header.assert_called_once_with("ESTIMATED TOTAL TIME · all 2 run(s)")
+            console.kv.assert_any_call("estimated total", "~120s remaining for all 2 run(s) · all selected detector groups")
+            console.header.reset_mock()
+            print_estimate(core, Path("core.json"))
+            console.header.assert_not_called()
+            console.section.assert_any_call("Runtime estimate · core group only")
+
     def test_load_once_per_worker_not_once_per_question(self):
         warm = {"detector_validation": 40, "reduction_scoring": 60}
         probe = {"fixed_detector_startup_seconds": 28}

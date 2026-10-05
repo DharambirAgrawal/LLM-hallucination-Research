@@ -6,7 +6,7 @@
 # test uses --runs 2 --max-samples 2 ...); every run prints the plan it used
 # and saves it in config_used.yaml / run_manifest.json.
 run:
-  runs: 3                   # independent repeats: run_01 … run_03, then combined/ (mean ± std)
+  runs: 4                   # independent repeats: run_01 … run_04, then combined/ (mean ± std)
   samples_per_dataset: 20   # questions per dataset (10 datasets below → 200 questions per run).
                             # HaluEval gives 2 labeled answers per question, RAGTruth ~6,
                             # HaluBench 1–2 → about 570 labeled cases per model per run

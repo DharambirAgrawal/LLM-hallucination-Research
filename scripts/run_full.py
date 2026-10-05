@@ -257,6 +257,8 @@ def main() -> None:
 
     # Phase 1: install every environment, download everything, preflight.
     console.header("Phase 1/2 · Prepare and check every detector group before the long runs")
+    console.line("Total time estimate pending: preflight measures this machine's speed.")
+    console.line("ESTIMATED TOTAL TIME will appear after every group's checks, before Run 1 starts.")
     pythons: dict[str, Path] = {}
     problems = []
     timings = {}
@@ -298,6 +300,7 @@ def main() -> None:
         console.line("To share the errors for help: python scripts/share_logs.py --upload")
         raise SystemExit(1)
 
+    timing = None
     if set(timings) == set(groups):
         from utils.runtime_estimate import combine_estimates, print_estimate, save_estimate
         try:
@@ -306,10 +309,13 @@ def main() -> None:
             save_estimate(timing_path, timing)
             print_estimate(timing, timing_path)
         except (ValueError, KeyError, TypeError, OSError) as exc:
-            console.line(f"Total runtime estimate unavailable: {exc}")
+            console.section("ESTIMATED TOTAL TIME · unavailable")
+            console.line(f"Could not calculate/save the combined estimate: {exc}")
     else:
         missing = sorted(set(groups) - set(timings))
-        console.line(f"Total runtime estimate unavailable: missing current timing data for {', '.join(missing)}")
+        console.section("ESTIMATED TOTAL TIME · unavailable")
+        console.line(f"Missing current timing data for {', '.join(missing)}; a complete total cannot be calculated.")
+        console.line("Check that main.py, scripts/run_full.py and utils/runtime_estimate.py are from the same update.")
     if args.preflight:
         console.header("Preflight passed · measured runs were not started")
         return
@@ -327,6 +333,14 @@ def main() -> None:
         run_name = f"run_{run_index:02d}"
         run_dir = output_dir / run_name
         console.header(f"Run {run_index}/{runs} · every detector group → {run_dir}")
+        if timing is not None:
+            remaining_runs = runs - run_index + 1
+            remaining_seconds = timing["seconds_per_run"] * remaining_runs
+            console.kv("estimated time", f"~{console.duration(timing['seconds_per_run'])} per run; "
+                       f"~{console.duration(remaining_seconds)} for {remaining_runs} remaining run(s)")
+            console.line("Preflight projection for all detector groups; report writing takes additional time.")
+        else:
+            console.kv("estimated time", "UNAVAILABLE · see the preflight timing message above")
         core_ok = True
         run_ok = False
         failed_groups = []

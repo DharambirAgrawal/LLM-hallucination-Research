@@ -127,6 +127,9 @@ class FullRunSequenceTests(unittest.TestCase):
                         self.assertEqual(cmd[cmd.index(flag) + 1], "6")
                 return types.SimpleNamespace(returncode=0)
             index = int(cmd[cmd.index("--run-index") + 1])
+            if write_timings:
+                from utils import console
+                console.kv.assert_any_call("estimated time", f"~0s per run; ~0s for {3 - index} remaining run(s)")
             commands[index, name] = cmd
             self.assertIn("--skip-preflight", cmd)
             self.assertIn("--smoke-2q", cmd)
@@ -170,6 +173,12 @@ class FullRunSequenceTests(unittest.TestCase):
                     self.assertEqual(caught.exception.code, 1)
                 else:
                     controller.main()
+            if write_timings:
+                from utils import console
+                console.header.assert_any_call("ESTIMATED TOTAL TIME · all 2 run(s)")
+            else:
+                from utils import console
+                console.section.assert_any_call("ESTIMATED TOTAL TIME · unavailable")
         return events, commands, titles
 
     def test_all_groups_then_report_before_next_run_and_combined_last(self):

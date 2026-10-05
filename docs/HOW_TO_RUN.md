@@ -120,6 +120,14 @@ starting any long run (§4).
 Every normal smoke/full command automatically prints the combined estimate
 after all detector groups pass preflight. No extra model calls are added just
 to estimate time, and no preflight scores or samples become research results.
+The total is **not available at startup**: Phase 1 first measures each group.
+Look for **ESTIMATED TOTAL TIME · all N run(s)** immediately before Phase 2.
+Earlier worker estimates cover only that named detector group. The
+`estimated total` line covers the remaining compute for every planned run
+and every selected detector group; report export requires additional time.
+The projection is repeated directly under each `Run i/N` heading, scaled to
+the number of runs still to execute. If timing data is missing, an explicit
+`UNAVAILABLE` line appears there instead of silently omitting the estimate.
 
 To prepare/check the machine and print the estimate **without starting measured
 runs**, add `--preflight` to the same command you intend to run:
@@ -154,7 +162,7 @@ the top of `config.yaml`. `python scripts/run_full.py` runs exactly this:
 
 | Setting (`run:`) | Default | Meaning |
 |---|---|---|
-| `runs` | 3 | independent repeats: `run_01`, `run_02`, `run_03`, then `combined/` with mean ± std |
+| `runs` | 4 | independent repeats: `run_01`, `run_02`, `run_03`, `run_04`, then `combined/` with mean ± std |
 | `samples_per_dataset` | 20 | questions per dataset, 10 datasets (HaluEval ×3, RAGTruth ×3, HaluBench ×4) |
 | `detectors` | selfcheckgpt, uqlm, uqlm_judge, minicheck, summac | add `alignscore` to include it |
 | `selfcheckgpt_samples` | 5 | answers sampled per question, per model, per run (shared by SelfCheckGPT and UQLM) |
@@ -179,7 +187,7 @@ defaults, one run is:
   (baseline, closed-book, greedy, Self-Refine, CoVe, UQLM best response;
   up to 16 generations per question), and every detector scores all six
   answers. MiniCheck/SummaC score them in their own environments afterwards.
-- **× 3 runs**, fresh sampling in each, then the combined report.
+- **× 4 runs**, fresh sampling in each, then the combined report.
 
 This is a long run on real hardware. The preflight measures every step on
 one real question and prints the expected time per run and in total before
@@ -313,7 +321,7 @@ cases in a row is stopped early with the reason.
 
 ```bash
 tmux new -s run                        # a multi-hour run should survive a closed terminal
-python scripts/run_full.py             # the run: block of config.yaml (3 runs by default)
+python scripts/run_full.py             # the run: block of config.yaml (4 runs by default)
 python scripts/run_full.py --runs 5    # or: 5 independent runs
 ```
 

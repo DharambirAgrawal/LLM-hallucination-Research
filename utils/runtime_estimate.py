@@ -81,8 +81,11 @@ def save_estimate(path: Path, estimate: dict) -> None:
 
 def print_estimate(estimate: dict, path: Path) -> None:
     from utils import console
-    console.section("Runtime estimate · from this machine's preflight")
     groups = estimate.get("groups")
+    if groups or estimate.get("group") == "standalone":
+        console.header(f"ESTIMATED TOTAL TIME · all {estimate['runs']} run(s)")
+    else:
+        console.section(f"Runtime estimate · {estimate['group']} group only")
     if groups:
         for name, group in groups.items():
             console.kv(name, f"~{console.duration(group['seconds_per_run'])} per run")
@@ -96,11 +99,15 @@ def print_estimate(estimate: dict, path: Path) -> None:
                 console.kv(stage.replace("_", " "), f"~{console.duration(seconds)} per run")
         if "questions" in estimate["calibration"]:
             console.kv("loaded questions", f"{estimate['calibration']['questions']} per run")
-    console.kv("one complete run", f"~{console.duration(estimate['seconds_per_run'])}")
-    console.kv("remaining compute", f"{estimate['runs']} run(s): ~{console.duration(estimate['remaining_compute_seconds'])}")
+    console.kv("per run", f"~{console.duration(estimate['seconds_per_run'])}")
+    scope = "all selected detector groups" if groups else "this worker group" if estimate.get("group") != "standalone" else "all selected detectors"
+    console.kv("estimated total", f"~{console.duration(estimate['remaining_compute_seconds'])} remaining for "
+               f"all {estimate['runs']} run(s) · {scope}")
     low, high = estimate["planning_range_seconds"]
     console.kv("planning range", f"~{console.duration(low)} to ~{console.duration(high)} for all runs")
     console.kv("already elapsed", console.duration(estimate['elapsed_setup_preflight_seconds']))
     console.line("Approximate, not a minimum; one probe cannot predict every answer length or retry.")
     console.line("Allow additional time for reports, file writing and worker startup.")
+    if not groups and estimate.get("group") != "standalone":
+        console.line("The full-experiment total appears after every selected group's preflight finishes.")
     console.kv("estimate saved", path)
