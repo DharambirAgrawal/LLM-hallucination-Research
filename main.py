@@ -103,6 +103,8 @@ def parse_args() -> argparse.Namespace:
              "the time estimate, then stop (no long stage is started)",
     )
     parser.add_argument("--skip-preflight", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--estimate-reduction-answers-per-question", type=int, default=0,
+                        help=argparse.SUPPRESS)  # full-run fixed-detector workers, preflight only
     return parser.parse_args()
 
 
@@ -610,14 +612,20 @@ def main() -> None:
     runner.attach(generators)   # a model that does not fit can take the detectors' GPU memory
     if not args.skip_preflight:
         console.section("Preflight (one real case through every detector, model and stage)")
-        estimate = run_preflight(config, runner, datasets, generators, reduce_on)
-        per_run_seconds = sum(estimate.values())
-        if per_run_seconds:
-            parts = [f"{stage.replace('_', ' ')} ~{console.duration(sec)}"
-                     for stage, sec in estimate.items() if sec]
-            console.line(f"Estimated time per run: {' · '.join(parts)}")
-            console.line(f"Estimated total: {n_runs} run(s) × ~{console.duration(per_run_seconds)} "
-                         f"= ~{console.duration(per_run_seconds * n_runs)}")
+        timing_options = {}
+        if args.estimate_reduction_answers_per_question:
+            timing_options["reduction_answers_per_question"] = args.estimate_reduction_answers_per_question
+        estimate = run_preflight(config, runner, datasets, generators, reduce_on, **timing_options)
+        from utils.runtime_estimate import build_estimate, print_estimate, save_estimate
+        timing_path = (output_dir / "logs" / f"preflight-timing-{part}.json" if part
+                       else output_dir / "runtime_estimate.json")
+        if estimate:
+            timing = build_estimate(estimate, 1 if args.run_index is not None else n_runs,
+                                    calibration=getattr(runner, "preflight_timing", {}),
+                                    elapsed_seconds=time.monotonic() - started,
+                                    group=part or "standalone", reload_fixed_detectors=bool(part))
+            save_estimate(timing_path, timing)
+            print_estimate(timing, timing_path)
     if args.preflight:
         console.section("Preflight passed")
         console.line("Everything needed is downloaded and working. Run again without "

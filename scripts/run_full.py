@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.util
+import json
 import os
 import shutil
 import subprocess
@@ -83,6 +84,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"),
                         help="Device for the torch-based detectors (default: auto)")
     parser.add_argument("--skip-report", action="store_true", help="Do not build the reports")
+    parser.add_argument("--preflight", action="store_true",
+                        help="Prepare/check all selected groups, print the total runtime estimate, then stop")
     return parser.parse_args()
 
 
@@ -256,6 +259,7 @@ def main() -> None:
     console.header("Phase 1/2 · Prepare and check every detector group before the long runs")
     pythons: dict[str, Path] = {}
     problems = []
+    timings = {}
     for index, name in enumerate(groups, 1):
         console.section(f"[{index}/{total}] {name}: {', '.join(groups[name])}")
         try:
@@ -266,10 +270,23 @@ def main() -> None:
             console.line(f"✗ {reason}")
             problems.append((name, reason))
             continue
-        code = subprocess.run([str(pythons[name]), "main.py", *main_args(name), "--preflight"],
+        timing_path = log_dir / f"preflight-timing-{name}.json"
+        # An existing preflight-only folder may contain old timings. Accept
+        # only a file written by the current successful worker.
+        previous_timing = timing_path.read_bytes() if timing_path.is_file() else None
+        timing_args = []
+        if name != "core" and reduce_on:
+            from utils.runtime_estimate import reduction_answers_per_question
+            timing_args = ["--estimate-reduction-answers-per-question", str(reduction_answers_per_question(config))]
+        code = subprocess.run([str(pythons[name]), "main.py", *main_args(name), "--preflight", *timing_args],
                               cwd=ROOT, env=env).returncode
         if code != 0:
             problems.append((name, f"preflight failed — see {log_dir / f'{name}.log'}"))
+        elif timing_path.is_file() and timing_path.read_bytes() != previous_timing:
+            try:
+                timings[name] = json.loads(timing_path.read_text(encoding="utf-8"))
+            except (ValueError, OSError) as exc:
+                console.line(f"Timing estimate unavailable for {name}: {exc}")
 
     if problems:
         console.header("Stopped before the long runs")
@@ -280,6 +297,22 @@ def main() -> None:
         console.line("installed environments and downloads are reused.")
         console.line("To share the errors for help: python scripts/share_logs.py --upload")
         raise SystemExit(1)
+
+    if set(timings) == set(groups):
+        from utils.runtime_estimate import combine_estimates, print_estimate, save_estimate
+        try:
+            timing = combine_estimates(timings, runs, elapsed_seconds=time.monotonic() - started)
+            timing_path = output_dir / "runtime_estimate.json"
+            save_estimate(timing_path, timing)
+            print_estimate(timing, timing_path)
+        except (ValueError, KeyError, TypeError, OSError) as exc:
+            console.line(f"Total runtime estimate unavailable: {exc}")
+    else:
+        missing = sorted(set(groups) - set(timings))
+        console.line(f"Total runtime estimate unavailable: missing current timing data for {', '.join(missing)}")
+    if args.preflight:
+        console.header("Preflight passed · measured runs were not started")
+        return
 
     # Complete all groups for one run, publish its reports, then start the next.
     # Only one environment is loaded at a time. Each run recomputes every

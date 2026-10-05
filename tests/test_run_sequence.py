@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import csv
 import importlib.util
+import json
 import sys
 import tempfile
 import types
@@ -11,6 +12,8 @@ import unittest
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+from utils.runtime_estimate import build_estimate
 
 import utils
 
@@ -105,13 +108,23 @@ def config():
 
 
 class FullRunSequenceTests(unittest.TestCase):
-    def exercise(self, root, *, failure=None, report_failure=None, skip_report=False):
+    def exercise(self, root, *, failure=None, report_failure=None, skip_report=False,
+                 preflight_only=False, write_timings=False):
         events, commands, titles = [], {}, {}
 
         def child(cmd, **kwargs):
             name = cmd[cmd.index("--part") + 1]
             if "--preflight" in cmd:
                 events.append(("preflight", name))
+                if write_timings:
+                    folder = root / "logs"
+                    folder.mkdir(exist_ok=True)
+                    (folder / f"preflight-timing-{name}.json").write_text(json.dumps(
+                        build_estimate({"detector_validation": 10, "reduction": 20 if name == "core" else 0},
+                                       2, group=name, calibration={"questions": 2})))
+                    if name != "core":
+                        flag = "--estimate-reduction-answers-per-question"
+                        self.assertEqual(cmd[cmd.index(flag) + 1], "6")
                 return types.SimpleNamespace(returncode=0)
             index = int(cmd[cmd.index("--run-index") + 1])
             commands[index, name] = cmd
@@ -145,6 +158,8 @@ class FullRunSequenceTests(unittest.TestCase):
             args = ["run_full.py", "--smoke-2q", "--output", str(root)]
             if skip_report:
                 args.append("--skip-report")
+            if preflight_only:
+                args.append("--preflight")
             with patch.object(controller, "ensure_python", return_value=Path(sys.executable)), \
                     patch.object(controller.subprocess, "run", side_effect=child), \
                     patch.dict(sys.modules, {"reporting": module("reporting", generate=report)}), \
@@ -188,6 +203,30 @@ class FullRunSequenceTests(unittest.TestCase):
             events, _, _ = self.exercise(Path(temp), skip_report=True)
         self.assertFalse(any(event[0] == "report" for event in events))
 
+    def test_total_estimate_adds_groups_and_all_runs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            events, _, _ = self.exercise(root, write_timings=True)
+            estimate = json.loads((root / "runtime_estimate.json").read_text())
+        self.assertEqual(estimate["seconds_per_run"], 60)
+        self.assertEqual(estimate["remaining_compute_seconds"], 120)
+        self.assertEqual(estimate["planning_range_seconds"], [90, 240])
+        self.assertEqual(events[-1], ("report", "combined"))
+
+    def test_full_preflight_only_estimates_without_any_measured_run(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            events, commands, _ = self.exercise(root, write_timings=True, preflight_only=True)
+            self.assertTrue((root / "runtime_estimate.json").is_file())
+        self.assertFalse(commands)
+        self.assertEqual(events, [("preflight", name) for name in GROUPS])
+
+    def test_missing_worker_timings_do_not_invent_total(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.exercise(root, preflight_only=True)
+            self.assertFalse((root / "runtime_estimate.json").exists())
+
 
 class IndependentScoreTests(unittest.TestCase):
     def test_same_runner_recomputes_all_fixed_detector_scores_on_second_run(self):
@@ -209,8 +248,13 @@ class IndependentScoreTests(unittest.TestCase):
                 self.assertEqual(first.rows[0][f"{name}_score"], .1)
                 self.assertEqual(second.rows[0][f"{name}_score"], .3)
 
-    def exercise_main(self, root, *, worker_index=None):
-        with dependencies(config()) as (_, Bank):
+    def exercise_main(self, root, *, worker_index=None, preflight_only=False,
+                      mode="--smoke-2q", timed=False):
+        fixture = config()
+        if mode != "--smoke-2q":
+            fixture["datasets"] = fixture["datasets"][:1]
+            fixture["run"].update(detectors=["selfcheckgpt", "uqlm"], runs=3)
+        with dependencies(fixture) as (_, Bank):
             generator = types.SimpleNamespace(name="fake-generator", config={})
             generator.sample_n = MagicMock(side_effect=lambda *args, **kwargs:
                                            [f"generation-{generator.sample_n.call_count}"] * kwargs["n"])
@@ -222,7 +266,7 @@ class IndependentScoreTests(unittest.TestCase):
 
             def preflight(*args):
                 runner.bank.get(generator, "q", "c")
-                return {}
+                return {"detector_validation": 60} if timed else {}
 
             def run_once(folder, *args, **kwargs):
                 folder.mkdir(parents=True)
@@ -235,15 +279,29 @@ class IndependentScoreTests(unittest.TestCase):
                 "reporting": module("reporting", generate=lambda *args, **kwargs: {"report (docx)": "fake"}),
             }):
                 worker = load_script("main_under_test", "main.py")
-                argv = ["main.py", "--smoke-2q", "--device", "cpu", "--output", str(root)]
+                argv = ["main.py", "--device", "cpu", "--output", str(root)]
+                if mode:
+                    argv.append(mode)
+                if preflight_only:
+                    argv.append("--preflight")
                 if worker_index is not None:
                     argv += ["--part", "core", "--run-index", str(worker_index), "--skip-preflight",
                              "--detectors", "selfcheckgpt", "uqlm", "uqlm_judge", "--runs", "2"]
                 with patch.object(sys, "argv", argv), \
                         patch.object(worker, "run_once", side_effect=run_once), \
-                        patch.object(worker, "load_config", side_effect=lambda path: config()):
+                        patch.object(worker, "load_config", side_effect=lambda path: copy.deepcopy(fixture)):
                     worker.main()
             return observed
+
+    def test_smoke_2q_smoke_and_full_preflight_save_correct_number_of_runs(self):
+        for mode, expected_runs in (("--smoke-2q", 2), ("--smoke", 2), (None, 3)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                observed = self.exercise_main(root, mode=mode, timed=True, preflight_only=True)
+                estimate = json.loads((root / "runtime_estimate.json").read_text())
+                self.assertFalse(observed)
+                self.assertEqual(estimate["remaining_compute_seconds"], expected_runs * 60)
+                self.assertEqual(estimate["runs"], expected_runs)
 
     def test_standalone_discards_preflight_samples_and_resamples_every_run(self):
         with tempfile.TemporaryDirectory() as temp:

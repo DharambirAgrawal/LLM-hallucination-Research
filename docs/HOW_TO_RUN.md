@@ -99,19 +99,53 @@ Every `main.py` run goes through the same order, and stops at the first
 problem, before anything long starts:
 
 1. **Setup**: download/pull whatever is missing (§0.4).
-2. **Preflight**: one real question through the whole pipeline. Every
+2. **Preflight**: one real question near the median input length through the whole pipeline. Every
    detector loads and scores it, every model answers and draws its samples,
    every sampling-based detector scores with them, and with the reduction
    stage on, every reduction method runs once per model and all its answers
    are scored. Each check prints ✓ or ✗ with the reason. Any ✗ stops the run.
-3. **Estimate**: the preflight timings give the expected time per run and in
-   total.
+3. **Estimate**: the preflight timings and actual loaded question/labeled-answer
+   counts give approximate compute time per run, remaining compute across all
+   runs, and a rough planning range. The full-run command sums all selected
+   detector groups, including their later scoring of the reduced answers.
 4. The long stages.
 
 `python main.py ... --preflight` does steps 1–3 and stops, so you can check
 a machine (and see the time estimate) before committing to a run.
 `scripts/run_full.py` runs the preflight of **every** environment before
 starting any long run (§4).
+
+### Estimate the selected plan before the measured runs
+
+Every normal smoke/full command automatically prints the combined estimate
+after all detector groups pass preflight. No extra model calls are added just
+to estimate time, and no preflight scores or samples become research results.
+
+To prepare/check the machine and print the estimate **without starting measured
+runs**, add `--preflight` to the same command you intend to run:
+
+```bash
+python scripts/run_full.py --smoke-2q --preflight
+python scripts/run_full.py --smoke --preflight
+python scripts/run_full.py --preflight
+```
+
+These commands perform the usual setup and real preflight; missing resources
+are fetched according to the normal setup policy. They are not offline dry runs.
+
+The output includes each detector group's time per run, the loaded question
+count, one complete run, all planned runs, and setup/preflight time already
+elapsed. It is also saved to `runtime_estimate.json` in the output folder;
+individual worker measurements are in `logs/preflight-timing-<group>.json`.
+
+The planning range is **75%–200% of the measured projection**, a scheduling
+heuristic rather than a confidence interval or guaranteed minimum. Input/answer
+lengths, reducer early stopping, judge calls, GPU/CPU fallback, model switching
+and retries can put actual time outside that range. Detector cold loading is
+counted once per worker/run, not multiplied by every question; generator restart
+time uses each model's initial answer as an approximate allowance. Report export,
+file writing and worker process startup require additional time and are not
+included in the compute projection. Setup/preflight already elapsed is separate.
 
 ## 2. What the full run does
 
@@ -495,7 +529,7 @@ instead of the newest.
 | `--device auto\|cpu\|cuda` | ✓ | ✓ | Device for the torch-based detectors (default `auto`: GPU if present) |
 | `--output DIR` | ✓ | ✓ | Where results are written |
 | `--config FILE` | ✓ | ✓ | Another config file (default `config.yaml`) |
-| `--preflight` | ✓ | | Download everything, check the pipeline on one question, print the estimate, stop |
+| `--preflight` | ✓ | ✓ | Prepare/check the selected plan, print its runtime estimate, stop before measured runs |
 | `--dry-run` | ✓ | | Show what is present / would be downloaded; download and load nothing |
 | `--score-reduction-from DIR` | ✓ | | Score another environment's reduction answers (used by `run_full.py`) |
 | `--skip-report` | | ✓ | Skip per-run and combined reports |
