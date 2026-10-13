@@ -20,6 +20,8 @@ Ollama models are pulled by models/model_factory.py.
 from __future__ import annotations
 
 import hashlib
+import os
+import zipfile
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -42,6 +44,10 @@ SPACY_MODEL_WHEEL = (
     "https://github.com/explosion/spacy-models/releases/download/"
     "en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
 )
+
+
+NLTK_DATA_REVISION = "550b6625bcef1f2abff2ff770a5a0d272c9c6b2a"   # nltk/nltk_data gh-pages
+NLTK_DATA_DIR = ROOT / "external_models" / "nltk_data"
 
 
 @dataclass(frozen=True)
@@ -83,6 +89,15 @@ REMOTE_FILES = {
         "SummaC-Conv vitc weights",
         "https://github.com/tingofurro/summac/raw/c1f3da93cd074c24d8033eb27a88b5a7cc5c08fa/summac_conv_vitc_sent_perc_e.bin",
         "cd880581f59bd47b8968c7f48d754cd617dfe9b256d8d76fdcbc0fa4a3b3c6fe", 1_811,
+    ),
+    # NLTK's sentence splitter data (MiniCheck, SummaC, AlignScore split with
+    # nltk.sent_tokenize). Fetched here instead of with nltk.download(): NLTK
+    # 3.10's download sandbox refused it on a fresh machine (Colab), and that
+    # failure was easy to miss.
+    "external_models/nltk_data/tokenizers/punkt_tab.zip": RemoteFile(
+        "NLTK punkt_tab",
+        f"https://raw.githubusercontent.com/nltk/nltk_data/{NLTK_DATA_REVISION}/packages/tokenizers/punkt_tab.zip",
+        "e57f64187974277726a3417ca6f181ec5403676c717672eef6a748a7b20e0106", 4_319_076,
     ),
     "external_models/alignscore/AlignScore-base.ckpt": RemoteFile(
         "AlignScore-base checkpoint",
@@ -191,22 +206,39 @@ def ensure_spacy_model(dry_run: bool = False) -> None:
     console.line(f"✓ {'spaCy ' + SPACY_MODEL:<34} {'':>9}  installed")
 
 
-def ensure_nltk_punkt(dry_run: bool = False) -> None:
+def use_nltk_data() -> None:
+    """Point NLTK at the project's verified data folder (this process and the
+    processes it starts)."""
+    path = str(NLTK_DATA_DIR)
+    current = [p for p in os.environ.get("NLTK_DATA", "").split(os.pathsep) if p]
+    if path not in current:
+        os.environ["NLTK_DATA"] = os.pathsep.join([path, *current])
     try:
         import nltk
+        if path not in nltk.data.path:
+            nltk.data.path.insert(0, path)
     except ImportError:
-        return
-    for resource in ("punkt", "punkt_tab"):
-        label = f"NLTK {resource}"
-        try:
-            nltk.data.find(f"tokenizers/{resource}")
-            console.line(f"✓ {label:<34} {'':>9}  present")
-        except LookupError:
-            if dry_run:
-                console.line(f"↓ {label:<34} {'':>9}  will be downloaded")
-                continue
-            nltk.download(resource, quiet=True)
-            console.line(f"✓ {label:<34} {'':>9}  downloaded")
+        pass
+
+
+def ensure_nltk_punkt(dry_run: bool = False) -> None:
+    """NLTK's punkt_tab sentence-splitter data, from the pinned nltk_data
+    commit, checksum-verified and unpacked into external_models/nltk_data."""
+    zip_path = "external_models/nltk_data/tokenizers/punkt_tab.zip"
+    folder = NLTK_DATA_DIR / "tokenizers" / "punkt_tab"
+    if folder.is_dir() and (folder / "english").is_dir():
+        console.line(f"✓ {'NLTK punkt_tab':<34} {'':>9}  present")
+    else:
+        fetched = ensure_file(zip_path, dry_run)
+        if dry_run:
+            return
+        with zipfile.ZipFile(ROOT / zip_path) as archive:
+            for member in archive.namelist():   # no path may leave the target folder
+                if member.startswith("/") or ".." in Path(member).parts:
+                    raise RuntimeError(f"unsafe path in {zip_path}: {member}")
+            archive.extractall(NLTK_DATA_DIR / "tokenizers")
+        console.line(f"✓ {'NLTK punkt_tab':<34} {'':>9}  unpacked" + ("" if fetched else " (zip present)"))
+    use_nltk_data()
 
 
 def prepare(config: dict, dry_run: bool = False) -> None:

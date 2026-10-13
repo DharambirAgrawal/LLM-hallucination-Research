@@ -100,13 +100,17 @@ class RuntimeEstimateTests(unittest.TestCase):
                 estimate = module.run_preflight({"benchmark": {"output_dir": tmp}}, runner,
                                                {"qa": samples}, [], False, reduction_answers_per_question=30)
         # Three questions, six labeled cases, five generators × six conditions.
-        self.assertEqual(estimate["detector_validation"], 12)
+        self.assertEqual(estimate["detector_scoring"], 12)
         self.assertEqual(estimate["reduction_scoring"], 180)
         self.assertEqual(runner.preflight_timing["fixed_detector_startup_seconds"], 28)
         self.assertEqual(runner.preflight_timing["probe"]["sample_id"], "1")
         self.assertEqual(scorer.call_count, 2)  # no extra calls just for the estimate
 
     def test_reducer_loading_is_not_multiplied_by_questions_or_models(self):
+        """The estimate follows the run's phases per model: generation
+        (samples + reduction answers per question), detector scoring (per
+        labeled case + reduction answers per question); one-off loading is
+        counted once, never per question or per model."""
         import utils
         console = types.ModuleType("utils.console")
         console.duration = str
@@ -120,7 +124,8 @@ class RuntimeEstimateTests(unittest.TestCase):
         loguru.logger = MagicMock()
         best = types.SimpleNamespace(_load=MagicMock())
         reducer = types.SimpleNamespace(_best=best,
-            _produce=MagicMock(return_value={"baseline": {"error": None, "answer": "answer"}}),
+            produce_generated=MagicMock(return_value={"baseline": {"error": None, "answer": "answer"}}),
+            select_best=MagicMock(), conditions=lambda: ["baseline"],
             _score=MagicMock(return_value={"sample_score": .2}))
         reduction_module = types.ModuleType("benchmark.reduction_runner")
         reduction_module.ReductionRunner = MagicMock(return_value=reducer)
@@ -136,8 +141,10 @@ class RuntimeEstimateTests(unittest.TestCase):
                 action()
                 if label == "reduction tools load":
                     return 50
-                if label.endswith("reduction round"):
+                if label.endswith("reduction answers"):
                     return 10
+                if "reduction scoring" in label:
+                    return 5
                 if label.endswith("answers"):
                     return 3
                 if label.endswith("samples"):
@@ -150,14 +157,18 @@ class RuntimeEstimateTests(unittest.TestCase):
                 bank=types.SimpleNamespace(get=MagicMock(return_value=["answer", "other"])))
             with tempfile.TemporaryDirectory() as tmp, patch.object(module.Preflight, "check", timed_check):
                 estimate = module.run_preflight({"benchmark": {"output_dir": tmp}}, runner, {"qa": samples}, generators, True)
-        self.assertEqual(estimate["reduction"], 60)
+        # per model: (10 reduction answers + 4 samples) × 3 questions
+        self.assertEqual(estimate["generation"], 2 * (10 + 4) * 3)
+        # per model: 2 s × 6 labeled cases + 5 s reduction scoring × 3 questions
+        self.assertEqual(estimate["detector_scoring"], 2 * (2 * 6 + 5 * 3))
+        self.assertNotIn("judge_scoring", estimate)      # no judge-phase detector
         self.assertEqual(estimate["reducer_loading"], 50)
-        self.assertEqual(estimate["generator_restarts"], 12)
+        self.assertEqual(estimate["model_loading"], 6)
         self.assertEqual(estimate["sampling_detector_loading"], 20)
-        self.assertEqual(estimate["detector_validation"], 48)
         reduction_module.ReductionRunner.assert_called_once()
         best._load.assert_called_once()
-        self.assertEqual(reducer._produce.call_count, 2)
+        self.assertEqual(reducer.produce_generated.call_count, 2)
+        self.assertEqual(reducer.select_best.call_count, 2)
 
 
 if __name__ == "__main__":

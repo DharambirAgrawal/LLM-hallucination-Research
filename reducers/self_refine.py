@@ -26,6 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional, TYPE_CHECKING
 
+from models.answer_cleanup import strip_commentary
 from models.prompts import grounded_prompt
 
 if TYPE_CHECKING:
@@ -39,6 +40,7 @@ class SelfRefineResult:
     iterations: int
     feedback_history: List[str] = field(default_factory=list)
     stopped_reason: str = "max_iterations"
+    commentary_removed: bool = False   # see models/answer_cleanup.py
 
 
 class SelfRefineReducer:
@@ -86,7 +88,9 @@ class SelfRefineReducer:
     ) -> str:
         return (
             "Rewrite the candidate answer to fix every issue raised in the "
-            "feedback, using ONLY the supplied context. Be concise.\n\n"
+            "feedback, using ONLY the supplied context. Be concise. Reply with "
+            "the revised answer only: no introduction, no explanation of the "
+            "changes.\n\n"
             f"Context: {context}\n\nQuestion: {question}\n\n"
             f"Candidate answer: {answer}\n\nFeedback: {feedback}\n\n"
             "Revised answer:"
@@ -107,6 +111,7 @@ class SelfRefineReducer:
         )
         initial = answer
         history: List[str] = []
+        removed = False
 
         for step in range(1, self.max_iterations + 1):
             feedback = self.model.generate(
@@ -115,10 +120,11 @@ class SelfRefineReducer:
             ).strip()
             history.append(feedback)
             if not feedback or self.STOP_TOKEN in feedback.upper():
-                return SelfRefineResult(initial, answer, step, history, "no_issues_reported")
-            answer = self.model.generate(
+                return SelfRefineResult(initial, answer, step, history, "no_issues_reported", removed)
+            answer, cleaned = strip_commentary(self.model.generate(
                 self._refine_prompt(question, context, answer, feedback),
                 temperature=self.temperature,
-            ).strip()
+            ).strip())
+            removed = removed or cleaned
 
-        return SelfRefineResult(initial, answer, self.max_iterations, history, "max_iterations")
+        return SelfRefineResult(initial, answer, self.max_iterations, history, "max_iterations", removed)

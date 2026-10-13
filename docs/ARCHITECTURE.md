@@ -79,13 +79,31 @@ flowchart TD
     c --> d["Build detectors · benchmark/runner.py<br/>and generators · models/model_factory.py"]
     d --> e["Preflight · benchmark/preflight.py<br/>1 real question through everything → time estimate"]
     e --> f{"for run 1 … N"}
-    f --> g["Stage A · runner.validate()"]
-    g --> h["Stage B · ReductionRunner.run()<br/>(or score another environment's answers)"]
-    h --> i["Archive: selfcheckgpt_samples.jsonl ·<br/>run_manifest.json · config_used.yaml · environment.txt"]
+    f --> g["Stage A + B · benchmark/phased.py<br/>per model: generate → detectors (GPU) → judge<br/>(other groups: runner.validate() + score core's answers)"]
+    g --> i["Archive: selfcheckgpt_samples.jsonl ·<br/>run_manifest.json · config_used.yaml · environment.txt"]
     i --> j["Report for this run · reporting/"]
     j --> f
     f -->|done| k["Combined report · reporting/<br/>mean ± std over runs"]
 ```
+
+### One GPU, three turns per model
+
+Ollama (generators, judge) and the detectors' torch models never need the GPU
+at the same time ([`benchmark/phased.py`](../benchmark/phased.py)):
+
+```mermaid
+flowchart LR
+    gen["1 · generate<br/>Ollama: this model only<br/>samples + reduction answers"] --> det["2 · detectors<br/>GPU: torch models only<br/>SelfCheckGPT n-gram/BERTScore/NLI,<br/>UQLM, best-response pick"]
+    det --> jud["3 · judge<br/>Ollama: judge model only<br/>SelfCheckGPT prompt, UQLM judge"]
+    jud -->|next model| gen
+```
+
+Between turns, the detectors' models are dropped from memory and loaded again
+from disk at their next turn (`BenchmarkRunner.park`; keeping ~6 GB of them in
+RAM got the run killed on a 12 GB machine), and Ollama models are unloaded. The output files and their columns are the same as with the
+one-pass flow (`runner.validate()` + `ReductionRunner.run()`, still used by
+the other detector groups and the tests); a test checks that both give
+identical scores.
 
 ## 4. Stage A: can the detectors be trusted?
 

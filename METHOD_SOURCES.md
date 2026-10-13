@@ -31,8 +31,14 @@ hallucinated**.
   `SelfCheckNLI` (the paper's strongest non-LLM variant) and
   `SelfCheckAPIPrompt` (the official LLM-prompt variant: "Is the sentence
   supported by the context above? Answer Yes or No."). The prompt scorer's
-  judge is a local Ollama model reached through Ollama's OpenAI-compatible
-  endpoint. `SelfCheckMQAG` is not used (it needs its own question-generation
+  judge is a local Ollama model. Upstream sends each (sample, sentence)
+  prompt through `SelfCheckAPIPrompt.completion(prompt)` to an OpenAI client
+  (temperature 0, 5 output tokens); the adapter replaces that one method so the
+  same request goes to Ollama's native chat API with the run's context window
+  (`ollama.num_ctx`; the OpenAI-compatible endpoint cannot set it, and a
+  different value would make Ollama reload the judge). A prompt already sent is
+  answered from memory (temperature 0: same prompt, same answer). The prompt
+  template, the Yes/No mapping and the averaging are upstream's. `SelfCheckMQAG` is not used (it needs its own question-generation
   models and is not one of the paper's recommended variants).
 - Responses are split into sentences with spaCy `en_core_web_sm`, exactly as
   in the upstream README; the response score is the mean of the sentence
@@ -70,8 +76,15 @@ hallucinated**.
   model, layer, baseline file, idf off, batch size 64) and kept loaded on the
   configured device. This model-loading change preserves the scores; the
   separate short-sentence repair above changes only the formerly crashing inputs.
+- Scored in two phases per generator model (benchmark/phased.py): n-gram,
+  BERTScore and NLI on the GPU while Ollama is empty, then the prompt scorer
+  while Ollama holds only the judge. The inputs and the scorers are the same;
+  only the order of the work changed.
 
 ### UQLM (Bouchard et al., 2025)
+
+- `nli_batch_size` is set to 8 (UQLM's default is 32): pairs per GPU forward
+  pass. It changes memory use, not the scores (padding is masked).
 
 - `BlackBoxUQ(...).score(responses, sampled_responses)`: semantic negentropy
   (normalized semantic entropy, Farquhar et al., Nature 2024),
@@ -158,6 +171,18 @@ scored by every detector against the same samples.
 | `greedy` | grounded answer at temperature 0 | decoding setting, not a paper method | `decoding_setting_…` |
 | `self_refine_adapted` | generate → feedback → refine loop | Self-Refine, Madaan et al. 2023; official code is task-specific, so this is a **local inspired adaptation** ([`reducers/self_refine.py`](reducers/self_refine.py)) | `local_inspired_baseline_NOT_an_upstream_reproduction` |
 | `cove_adapted` | Chain-of-Verification, factored: plan verification questions, answer each separately without the draft, revise (self-verification) | Dhuliawala et al. 2023; **no official code exists**, implemented from the paper ([`reducers/cove.py`](reducers/cove.py)) | `local_implementation_of_published_method_no_official_code` |
+
+Self-refine's revise prompt asks for "the revised answer only: no
+introduction, no explanation of the changes", and both self-refine and CoVe
+pass their final answer through
+[`models/answer_cleanup.py`](models/answer_cleanup.py), which removes only an
+introducing line ("Here is the revised answer:"), a leading "Revised answer:"
+label, and closing paragraphs about the revision ("This revised answer ...",
+"I removed ..."). In the first full run 48% of llama3.2-3b's self-refine
+answers carried such text, which the detectors scored as part of the answer.
+Whether text was removed is recorded per answer
+(`details.commentary_removed`).
+
 | `uqlm_best_response` | pick the answer from the most probable meaning cluster among the baseline + its samples | UQLM `SemanticEntropy(use_best=True)`, **official** ([`reducers/uqlm_best_response.py`](reducers/uqlm_best_response.py)) | `official_uqlm_implementation` |
 
 Notes on `uqlm_best_response`: within the winning cluster UQLM returns the

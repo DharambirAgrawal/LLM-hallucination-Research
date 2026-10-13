@@ -617,6 +617,282 @@ class ReductionRunnerTests(unittest.TestCase):
                          ["Who?"])
 
 
+class PhasedRunTests(unittest.TestCase):
+    """benchmark/phased.py must give exactly the results of the one-pass
+    flow, while the generator, the torch detectors and the judge take turns."""
+
+    def setUp(self):
+        self.events = []
+        events = self.events
+        modules = fake_upstream_modules()
+        # SelfCheckGPT's official prompt scorer: one completion() per sentence x sample
+        apiprompt = types.ModuleType("selfcheckgpt.modeling_selfcheck_apiprompt")
+
+        class FakeAPIPrompt:
+            def __init__(self, client_type="openai", model=None):
+                self.prompt_template = "Context: {context}\n\nSentence: {sentence}\n\nIs the sentence supported?"
+
+            def completion(self, prompt):
+                raise AssertionError("the adapter routes completion() to Ollama")
+
+            def predict(self, sentences, sampled_passages, verbose=False):
+                return [float(np.mean([0.0 if self.completion(self.prompt_template.format(
+                    context=s, sentence=t)).lower().startswith("yes") else 1.0 for s in sampled_passages]))
+                        for t in sentences]
+        apiprompt.SelfCheckAPIPrompt = FakeAPIPrompt
+        modules["selfcheckgpt.modeling_selfcheck_apiprompt"] = apiprompt
+        # the Ollama server, as the judge sees it
+        ollama = types.ModuleType("ollama")
+        self.judge_prompts = []
+
+        class FakeClient:
+            def __init__(self, host=None, timeout=None):
+                pass
+
+            def chat(self, model, messages, options=None, stream=False):
+                prompt = messages[0]["content"]
+                events.append("judge")
+                self_ref.judge_prompts.append(prompt)
+                assert options.get("num_ctx") == 8192 and options.get("temperature") == 0.0
+                sentence = prompt.split("Sentence: ")[1]
+                return {"message": {"content": "No" if "1985" in sentence else "Yes"}}
+
+            def generate(self, model, prompt="", keep_alive=None):
+                return {}
+        self_ref = self
+        ollama.Client = FakeClient
+        modules["ollama"] = ollama
+        # torch scorers and the LLM judge record when they run
+        black_box = modules["uqlm"].BlackBoxUQ
+        original_score = black_box.score
+
+        def torch_score(this, *args, **kwargs):
+            events.append("torch")
+            return original_score(this, *args, **kwargs)
+        black_box.score = torch_score
+        judge = modules["uqlm.judges"].LLMJudge
+        original_judge = judge.judge_responses
+
+        async def judged(this, prompts, responses):
+            events.append("judge")
+            return await original_judge(this, prompts, responses)
+        judge.judge_responses = judged
+        self.modules = patch.dict(sys.modules, modules)
+        self.modules.start()
+
+    def tearDown(self):
+        self.modules.stop()
+
+    def _config(self, temp_dir):
+        return {
+            "datasets": [{"name": "synthetic", "enabled": True, "source": "synthetic", "max_samples": 2}],
+            "detectors": {"selfcheckgpt": {"enabled": True, "methods": ["ngram", "nli", "prompt"],
+                                           "n_samples": 2, "threshold": 3.0},
+                          "uqlm": {"enabled": True, "scorers": ["noncontradiction"]},
+                          "uqlm_judge": {"enabled": True}},
+            "judge": {"model": "judge:7b"},
+            "ollama": {"num_ctx": 8192, "parallel": 2},
+            "reduction": {"methods": ["closed_book", "greedy", "self_refine_adapted", "cove_adapted",
+                                      "uqlm_best_response"], "max_iterations": 1},
+            "benchmark": {"output_dir": temp_dir, "seed": 42},
+        }
+
+    def _model(self):
+        events = self.events
+
+        class Recorded(ScriptedChatModel):
+            def generate(self, prompt, **kwargs):
+                events.append("generate")
+                return super().generate(prompt, **kwargs)
+
+            def sample_n(self, prompt, n=5, temperature=1.0):
+                events.append("generate")
+                return super().sample_n(prompt, n, temperature)
+
+            def release(self):
+                events.append("release")
+        return Recorded()
+
+    def test_phased_results_equal_the_one_pass_results(self):
+        import pandas as pd
+        from benchmark.phased import run_phased
+        with tempfile.TemporaryDirectory() as one_pass, tempfile.TemporaryDirectory() as phased_dir:
+            config = self._config(one_pass)
+            datasets = DatasetLoader(config, seed=42).load_all()
+            runner = BenchmarkRunner(config)
+            raw_a = runner.validate(datasets, generators=[self._model()])
+            red_a = ReductionRunner(config, runner).run(datasets, generators=[self._model()])
+
+            self.events.clear()
+            self.judge_prompts.clear()
+            config_b = self._config(phased_dir)
+            runner_b = BenchmarkRunner(config_b)
+            for name in ("park", "unpark", "release_judge"):
+                setattr(runner_b, name, lambda n=name: self.events.append(n))
+            raw_b, red_b, seconds = run_phased(runner_b, datasets, [self._model()],
+                                               ReductionRunner(config_b, runner_b))
+            self.assertTrue((Path(phased_dir) / "detector_validation_raw.csv").is_file())
+            self.assertTrue((Path(phased_dir) / "reduction_comparison.csv").is_file())
+            self.assertEqual(set(seconds), {"generation", "detector_scoring", "judge_scoring"})
+
+        def same(a, b, keys):
+            cols = sorted(c for c in a.columns if c.endswith("_score") or c.endswith("_error")
+                          or c in ("answer", "error", "n_calls", "details"))
+            self.assertEqual(sorted(c for c in b.columns if c in cols or c.endswith("_score")), cols)
+            a = a.sort_values(keys).reset_index(drop=True)[keys + cols]
+            b = b.sort_values(keys).reset_index(drop=True)[keys + cols]
+            pd.testing.assert_frame_equal(a, b, check_dtype=False)
+        same(raw_a, raw_b, ["case_id", "model"])
+        same(red_a, red_b, ["sample_id", "model", "condition"])
+        self.assertTrue(raw_b["selfcheckgpt_prompt_score"].notna().all())
+        self.assertTrue(red_b["selfcheckgpt_prompt_score"].notna().all())
+
+        # the turns: no model call after the model is unloaded; torch scorers
+        # only while the detectors hold the GPU; the judge only outside it
+        ev = self.events
+        self.assertLess(max(i for i, e in enumerate(ev) if e == "generate"), ev.index("release"))
+        on_gpu = False
+        for e in ev:
+            on_gpu = True if e == "unpark" else False if e == "park" else on_gpu
+            if e == "torch":
+                self.assertTrue(on_gpu, ev)
+            if e in ("judge", "generate"):
+                self.assertFalse(on_gpu, ev)
+        # repeated judge prompts are answered from memory (methods that keep
+        # sentences of the baseline answer)
+        self.assertEqual(len(self.judge_prompts), len(set(self.judge_prompts)))
+
+    def test_failed_samples_are_recorded_once_and_never_redrawn(self):
+        from benchmark.phased import run_phased
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self._config(temp_dir)
+            config["reduction"]["methods"] = ["greedy"]
+            datasets = DatasetLoader(config, seed=42).load_all()
+            runner = BenchmarkRunner(config)
+            model = self._model()
+            calls = []
+
+            def broken(prompt, n=5, temperature=1.0):
+                calls.append(prompt)
+                raise RuntimeError("model failed 3 times")
+            model.sample_n = broken
+            raw, red, _ = run_phased(runner, datasets, [model], ReductionRunner(config, runner))
+        self.assertEqual(len(calls), len({c for c in calls}))       # one attempt per question
+        self.assertTrue(raw["selfcheckgpt_error"].str.contains("samples could not be drawn").all())
+        self.assertTrue(raw["uqlm_judge_score"].notna().all())       # model-independent judge unaffected
+
+
+class ReleaseBetweenTurnsTests(unittest.TestCase):
+    """During Ollama's turns the detectors' torch models are dropped (not
+    kept in RAM: that got the run killed on a 12 GB machine) and load again
+    on next use."""
+
+    def setUp(self):
+        self.modules = patch.dict(sys.modules, fake_upstream_modules())
+        self.modules.start()
+
+    def tearDown(self):
+        self.modules.stop()
+
+    def test_park_releases_torch_models_and_they_reload_on_next_use(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = {"detectors": {"selfcheckgpt": {"enabled": True, "methods": ["ngram", "nli"], "n_samples": 2},
+                                    "uqlm": {"enabled": True, "scorers": ["noncontradiction"]}},
+                      "reduction": {"methods": ["uqlm_best_response"]},
+                      "benchmark": {"output_dir": temp_dir}}
+            runner = BenchmarkRunner(config)
+            reducer = ReductionRunner(config, runner)
+            runner.extra_torch_holders = [reducer._best]
+            model = ScriptedChatModel()
+            case = {"case_id": "c", "question": "When?", "context": "ctx", "answer": "Python was released in 1991."}
+            before = runner.score_answer(case, model, part="torch")
+            reducer._best.select("Python was released in 1985.", ["Python was released in 1991."] * 2)
+            selfcheck, uqlm = runner.detectors["selfcheckgpt"], runner.detectors["uqlm"]
+            self.assertIn("nli", selfcheck._scorers)
+            self.assertIsNotNone(uqlm._uq)
+            self.assertIsNotNone(reducer._best._se)
+
+            self.assertEqual(runner.park(), 3)
+            self.assertNotIn("nli", selfcheck._scorers)
+            self.assertIn("ngram", selfcheck._scorers)               # light scorers stay
+            self.assertIsNone(uqlm._uq)
+            self.assertIsNone(reducer._best._se)
+            self.assertIsNone(reducer._best.nli)
+
+            runner._answer_cache = {}
+            after = runner.score_answer(case, model, part="torch")
+            self.assertEqual(before, after)                         # same scores after reloading
+            self.assertIn("nli", selfcheck._scorers)
+            reducer._best.select("Python was released in 1985.", ["Python was released in 1991."] * 2)
+            self.assertIsNotNone(reducer._best._se)
+
+
+class FixesFromFirstFullRunTests(unittest.TestCase):
+    """Problems found in the first full run (run-20261005-100926)."""
+
+    def test_a_few_recorded_failures_do_not_fail_a_run_but_silent_gaps_do(self):
+        from utils.completeness import inspect_scores
+        rows = [{"x_score": .5} for _ in range(299)]
+        explained = rows + [{"x_score": None, "x_error": "RuntimeError: model failed 3 times"}]
+        self.assertTrue(inspect_scores(explained, ["x_score"], 300)["passed"])     # 1 of 300, with a reason
+        silent = rows + [{"x_score": None}]
+        self.assertFalse(inspect_scores(silent, ["x_score"], 300)["passed"])       # no reason: never
+        many = rows[:290] + [{"x_score": None, "x_error": "broken"}] * 10
+        self.assertFalse(inspect_scores(many, ["x_score"], 300)["passed"])         # 3.3% > 1%
+        result = inspect_scores(explained, ["x_score"], 300)
+        self.assertEqual(result["rows_with_missing_scores"], 1)
+        self.assertEqual(result["errors"][0]["reason"], "RuntimeError: model failed 3 times")
+
+    def test_commentary_around_a_rewritten_answer_is_removed(self):
+        from models.answer_cleanup import strip_commentary
+        text = ("Here's a rewritten candidate answer that addresses the issue raised in the feedback:\n\n"
+                "Russell Ira Crowe is an actor and film producer.\n\n"
+                "I removed the information about him being a New Zealand citizen.")
+        self.assertEqual(strip_commentary(text), ("Russell Ira Crowe is an actor and film producer.", True))
+        self.assertEqual(strip_commentary("Revised answer: Paris."), ("Paris.", True))
+        for kept in ("The capital is Paris. Here is why: it is the seat of government.",
+                     "Paris.\n\nNote: back up your data first.",
+                     "**Cafe**  \nAddress: 1 Main St  \n\nOpen daily."):
+            self.assertEqual(strip_commentary(kept), (kept, False))
+
+    def test_self_refine_asks_for_the_answer_only_and_cleans_it(self):
+        model = ScriptedModel("m", ["The year 1985 is not supported.",
+                                    "Here is the revised answer:\n\nPython was released in 1991.\n\n"
+                                    "This revised answer removes the unsupported year."])
+        prompts = []
+        original = model.generate
+        model.generate = lambda prompt, **kw: (prompts.append(prompt), original(prompt, **kw))[1]
+        result = SelfRefineReducer(model, max_iterations=1).reduce("When?", "ctx", "Python was released in 1985.")
+        self.assertEqual(result.final_answer, "Python was released in 1991.")
+        self.assertTrue(result.commentary_removed)
+        self.assertIn("Reply with the revised answer only", prompts[-1])
+
+    def test_ollama_requests_use_num_ctx_and_retry_empty_reasoning_with_more_tokens(self):
+        fake_ollama = types.ModuleType("ollama")
+        seen = []
+
+        class Client:
+            def __init__(self, host=None, **kwargs):
+                pass
+
+            def chat(self, model, messages, options, stream=False, **kwargs):
+                seen.append(dict(options))
+                text = "" if len(seen) < 3 else "Four."
+                return {"message": {"content": text}, "prompt_eval_count": 8000}
+        fake_ollama.Client = Client
+        with patch.dict(sys.modules, {"ollama": fake_ollama}), patch("models.ollama_model.time.sleep"):
+            from models.ollama_model import OllamaModel
+            model = OllamaModel("gpt-oss", {"model": "gpt-oss:20b", "num_ctx": 8192, "think": "low",
+                                            "max_tokens": 1024})
+            self.assertEqual(model.generate("2 + 2?"), "Four.")
+        self.assertEqual([o["num_ctx"] for o in seen], [8192] * 3)
+        self.assertEqual([o["num_predict"] for o in seen], [1024, 2048, 4096])
+        self.assertGreater(model.truncated, 0)          # 8000 prompt tokens + answer > 8192: warned
+        message = model._explain("empty answer (a reasoning model may have spent all 1024 tokens thinking)")
+        self.assertNotIn("does not accept `think`", message)
+        self.assertIn("max_tokens", message)
+
+
 class CountingModel(ReplayModel):
     def __init__(self, responses, name="counting"):
         super().__init__(responses, name=name)
@@ -852,7 +1128,10 @@ class RunIntegrityTests(unittest.TestCase):
                                      "no_reduce": False, **flags})
         return main.apply_plan(config, args), config
 
-    def test_auto_device_leaves_a_small_gpu_to_ollama(self):
+    def test_auto_device_uses_any_gpu_and_cpu_flag_hides_it(self):
+        """The detectors take turns with Ollama (benchmark/phased.py), so
+        `auto` uses even an 8 GB GPU; an explicit cpu hides the GPU from the
+        process so no library takes it by itself."""
         import os
         import main
         main.DEVICE_NOTE.clear()
@@ -860,18 +1139,13 @@ class RunIntegrityTests(unittest.TestCase):
                 patch.dict(os.environ, {}, clear=False):
             os.environ.pop("CUDA_VISIBLE_DEVICES", None)
             plan, config = self._plan(device=None)
-            self.assertEqual(config["detectors"]["selfcheckgpt"]["device"], "cpu")
-            self.assertEqual(os.environ.get("CUDA_VISIBLE_DEVICES"), "")   # libraries cannot take the GPU
-            self.assertIn("RTX 5060", main.DEVICE_NOTE[0])
-        main.DEVICE_NOTE.clear()
-        with patch("utils.gpu.nvidia_gpu", return_value=("NVIDIA A100", 40.0)), \
-                patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-            plan, config = self._plan(device=None)
             self.assertEqual(config["detectors"]["selfcheckgpt"]["device"], "cuda")
             self.assertNotIn("CUDA_VISIBLE_DEVICES", os.environ)
+            self.assertIn("RTX 5060", main.DEVICE_NOTE[0])
             plan, config = self._plan(device="cpu")   # an explicit flag wins
             self.assertEqual(config["detectors"]["uqlm"]["device"], "cpu")
+            self.assertEqual(os.environ.get("CUDA_VISIBLE_DEVICES"), "")
+        main.DEVICE_NOTE.clear()
 
     def test_run_plan_precedence_flag_over_section_over_plan(self):
         # run block as the default

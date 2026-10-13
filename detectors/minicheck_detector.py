@@ -29,6 +29,10 @@ class MiniCheckDetector:
         self.threshold = threshold
         self._scorer = None
 
+    def release(self) -> None:
+        """Drop the model from memory; loaded again on next use."""
+        self._scorer = None
+
     def _load(self):
         if self._scorer is not None:
             return

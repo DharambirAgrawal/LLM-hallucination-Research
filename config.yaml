@@ -27,6 +27,18 @@ run:
 ollama:
   host: "http://localhost:11434"
   timeout: 600       # seconds per request; the first call loads the model (large ones take minutes)
+  # Context window (tokens) for every request: generators, the judge and
+  # SelfCheckGPT's prompt scorer. Ollama's default (4096) silently cut the
+  # longest prompts (HaluBench covidQA, up to ~6,500 tokens) in earlier runs.
+  # The preflight checks that the longest prompt in the data fits.
+  num_ctx: 8192
+  # Requests sent to Ollama at the same time: the 5 samples of a question, and
+  # SelfCheckGPT's prompt-scorer checks (~150,000 short judge calls per run).
+  # Only faster if the Ollama server allows it: set OLLAMA_NUM_PARALLEL=2 on
+  # the server (docs/HOW_TO_RUN.md, "Faster: parallel requests"). With 8 GB
+  # of GPU memory keep this at 2; each parallel slot needs its own num_ctx of
+  # memory. Results do not depend on it.
+  parallel: 2
   # Pull any selected model that is not on the Ollama server yet, with a
   # progress bar, before the run starts. Set false (here or per model) to
   # skip missing models instead.
@@ -180,6 +192,10 @@ judge:
 # Every score is oriented the same way: higher = more likely hallucinated.
 # Thresholds only affect accuracy/precision/recall/F1; AUROC/AUPRC are
 # threshold-free. None are calibrated yet (docs/REPRODUCIBILITY.md).
+# device "auto": the GPU when there is one. Ollama and the detectors never
+# hold the GPU at the same time: each model's answers are generated first,
+# then the detectors score them on the GPU, then the judge runs
+# (benchmark/phased.py), so this works on an 8 GB card too.
 detectors:
   selfcheckgpt:
     methods: ["ngram", "bertscore", "nli", "prompt"]   # all official SelfCheckGPT scorers
@@ -195,6 +211,7 @@ detectors:
     # smoke run gave it the same score on all 56 answers: no information).
     threshold: 0.5        # on risk = 1 − UQLM confidence
     device: "auto"
+    nli_batch_size: 8     # NLI pairs per GPU forward pass (UQLM default 32); same scores, less memory
 
   uqlm_judge:
     template: "true_false_uncertain"   # UQLM's default judge template
@@ -213,7 +230,9 @@ detectors:
   alignscore:
     threshold: 0.5
     checkpoint_path: "external_models/alignscore/AlignScore-base.ckpt"
-    device: "auto"
+    # AlignScore pins torch<2, whose CUDA builds do not support recent GPUs
+    # (e.g. RTX 50xx), so it runs on the CPU.
+    device: "cpu"
     model_name: "roberta-base"
 
 # Stage B. Every method answers the same questions; each is compared with the

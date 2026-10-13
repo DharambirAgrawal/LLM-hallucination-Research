@@ -859,8 +859,12 @@ def generate(input_dir: Path, out_dir: Optional[Path] = None, title: Optional[st
                     "completeness check. Do not treat it as a complete experiment. Failed folders: "
                     + ", ".join(failed_coverage))
     elif all(status and status.get("passed") for _, status in completeness):
-        report.note("Score completeness.", "All expected answer rows and finite detector scores passed "
-                    "the recorded checks in every input run folder.")
+        recorded = sum(int(stage.get("rows_with_missing_scores") or 0)
+                       for _, status in completeness for stage in status.values() if isinstance(stage, dict))
+        report.note("Score completeness.", "Every expected answer row is present in every input run folder"
+                    + (f"; {recorded} row(s) have a recorded failure (each with its reason, listed under "
+                       "Reliability, and excluded from the numbers), below the 1% limit."
+                       if recorded else " and every detector score is present and finite."))
     report.note("Reading the numbers.",
                 "Stage A AUROC: higher is better for the detector (0.5 = chance, 1.0 = perfect). "
                 "Stage B risk: lower is better for the answer. Change = method minus baseline, so a "
@@ -1126,6 +1130,16 @@ def generate(input_dir: Path, out_dir: Optional[Path] = None, title: Optional[st
                  f"The judge model was {judge_model}; its quality, the prompts, and the dataset may all "
                  "affect this result. Human review or a separate judge comparison is needed before "
                  "attributing the cause.")
+        if "uqlm_judge_score" in raw_all and raw_all["uqlm_judge_score"].notna().any():
+            judged = raw_all.drop_duplicates("case_id")
+            values = judged["uqlm_judge_score"].dropna()
+            share = float((values == values.mode().iloc[0]).mean())
+            flat = [ds for ds, g in judged.groupby("dataset")
+                    if g["uqlm_judge_score"].dropna().nunique() == 1] if "dataset" in judged else []
+            report.p(f"The judge gave the same verdict to {share:.0%} of the labeled answers"
+                     + (f", and the same verdict to every answer in {len(flat)} dataset(s) "
+                        f"({', '.join(flat)}): there its AUROC of 0.5 means no signal, not a weak one."
+                        if flat else "."))
     if no_signal:
         report.p(f"{', '.join(pretty(k) for k in no_signal)} gave the same score to every answer, so it carries "
                  "no information on this data and is not used to judge anything.")

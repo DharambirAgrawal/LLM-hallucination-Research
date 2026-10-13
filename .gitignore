@@ -134,3 +134,6 @@ dmypy.
 
 # scripts/share_logs.py output
 debug_report.txt
+
+# run archives (e.g. a zipped results folder copied from the GPU machine)
+*.zip

@@ -254,10 +254,15 @@ python scripts/run_full.py --smoke \
 Check: the final table shows ✓ for every detector group, and
 `results/smoke-<date-time>/combined/report.docx` (or `report.html`) opens
 with its summary, charts and tables; each `run_01/`, `run_02/` has its own.
-Every required detector score must be present and finite. Any missing score,
-partial scorer error, empty answer, or incorrect row count causes a nonzero
-exit. Each detector-group folder records `score_completeness.json`; reports
-from incomplete runs are diagnostic, not passing research results.
+Every expected answer row must be present, and every missing score must have
+a recorded reason (e.g. a model that returned no answer to one question).
+A missing row, a score missing without a reason, or recorded failures in more
+than 1% of the rows cause a nonzero exit and a run marked incomplete. A few
+recorded failures do not: in the first full run, 1 missing score out of 2,835
+(gpt-oss-20b on one long question) failed every run and stopped MiniCheck and
+SummaC from scoring the reduction answers. Each detector-group folder records
+`score_completeness.json` with every failure and its reason; the report lists
+them under Reliability and excludes them from the numbers.
 SelfCheckGPT BERTScore's formerly crashing short-sentence inputs have a
 documented preprocessing repair (see `METHOD_SOURCES.md` and the report).
 If a preflight check fails, phase 1 stops before the measured runs.
@@ -463,44 +468,82 @@ of silently continuing on partial data.
 
 ### GPU memory: how models are loaded
 
-Ollama and the detectors share the GPU. Models are used **one at a time**:
-each generator is loaded when it is first asked, and unloaded
-(`keep_alive=0`) as soon as its part is done, in the preflight, the detector
-validation and the reduction stage. So at most one generator, plus the judge
-(`mistral:7b`) and the detectors' torch models (~6 GB in total), share the
-GPU at any moment.
+Ollama (the generators and the judge) and the detectors' torch models share
+one GPU by **taking turns** (benchmark/phased.py). For each generator model:
 
-**Which device `device: auto` picks.** On a GPU with less than 16 GB (e.g. an
-8 GB RTX 5060), the detectors (~6 GB) and a 4–5 GB Ollama model do not fit
-together, so the GPU is left to Ollama and the detectors run on the CPU. The
-detector process then does not see the GPU at all, so no library can take GPU
-memory by itself. Ollama keeps the whole GPU and puts what does not fit on
-the CPU by itself (`ollama ps` shows e.g. `20%/80% CPU/GPU`). The Detectors
-section of the terminal says which was chosen and why. The scores are the
-same; the detectors are slower, and the preflight's time estimate includes
-that. On 16 GB or more the detectors use the GPU. `--device cuda` or
-`--device cpu` overrides the choice.
+1. **generate**: Ollama holds only this model. It writes its samples for every
+   question and every reduction answer (baseline, closed-book, greedy,
+   self-refine, CoVe). The detectors' models are not loaded. Then the model
+   is unloaded.
+2. **detectors**: Ollama is empty; the torch detectors (SelfCheckGPT n-gram,
+   BERTScore, NLI; UQLM) score every labeled answer and every reduction answer
+   on the GPU, and UQLM picks its best response.
+3. **judge**: the detectors' models are dropped again and Ollama holds only
+   the judge (`mistral:7b`): SelfCheckGPT's prompt scorer and UQLM's LLM judge.
+   Then the judge is unloaded.
 
-`gpt-oss:20b` needs ~13 GB by itself; the other generators need 2–5 GB. If
-memory still runs out while a model loads, the run recovers on its own instead
-of failing:
+So the GPU holds one thing at a time, and `device: auto` uses the GPU even on
+an 8 GB card. The first full run (before this change) mixed the three per
+question: Ollama kept reloading models and the detectors had to run on the
+CPU, which made a run take ~2.5 days. Dropping the detectors' models
+between turns and loading them again does not change them, so the scores are
+the same; it costs ~20-40 s per model and keeps the run within 12 GB of RAM
+(keeping ~6 GB of them in RAM got the run killed on Colab).
+
+MiniCheck, SummaC and AlignScore run in their own processes after the core
+group, when Ollama is idle: they unload whatever Ollama still holds and use the
+whole GPU. AlignScore stays on the CPU (`device: cpu` in config.yaml): it
+needs torch < 2, which has no support for recent GPUs.
+
+`gpt-oss:20b` needs ~13 GB, more than an 8 GB GPU has; Ollama then runs part
+of it on the CPU by itself (`ollama ps` shows e.g. `40%/60% CPU/GPU`). That
+works, but it is the slowest model by far (5 of the 8.7 generation hours per
+run in the first full run).
+
+If memory still runs out, the run recovers instead of failing:
 
 1. **An Ollama model does not fit** ("model failed to load … resource
-   limitations"): the other models loaded in Ollama are unloaded, the torch
-   detectors are moved to the CPU for the rest of the run, and the request is
-   retried.
+   limitations"): the other models loaded in Ollama are unloaded, the
+   detectors' models are dropped from memory, and the request is retried.
 2. **A detector runs out of GPU memory** ("CUDA out of memory"): the torch
-   cache is freed and the case retried; if it fails again, that detector
-   is reloaded on the CPU for the rest of the run.
+   cache is freed and the case retried; if it fails again, that detector is
+   reloaded on the CPU for the rest of the run (logged as a warning and
+   recorded in `config_used.yaml`; same scores, slower).
 
-Each move is logged as a warning, and the device used is recorded in
-`config_used.yaml`. The scores are the same on the CPU; only slower. If a model
-still does not fit, the error says so; check `nvidia-smi` for other programs
-using the GPU, or replace the model with a smaller one. To keep the detectors
-off the GPU from the start, run with `--device cpu` (the default below 16 GB).
+`--device cpu` keeps every detector off the GPU. While a run is going you can
+watch memory with `nvidia-smi` and see which model Ollama holds with
+`ollama ps`.
 
-While a run is going you can watch memory with `nvidia-smi` and see which
-models Ollama holds with `ollama ps`.
+### Faster: parallel requests (`ollama.parallel`)
+
+The run sends up to `ollama.parallel` requests (default 2) to Ollama at once:
+the 5 samples of a question, and SelfCheckGPT's prompt-scorer checks (about
+150,000 short judge calls per run). The Ollama server answers them together
+only if it is allowed to; otherwise it queues them (no harm, no gain). On the
+GPU machine, once:
+
+```bash
+sudo systemctl edit ollama
+# add these two lines, save, close:
+#   [Service]
+#   Environment="OLLAMA_NUM_PARALLEL=2"
+sudo systemctl restart ollama
+```
+
+(If Ollama is not a system service, start it with `OLLAMA_NUM_PARALLEL=2 ollama serve`.)
+Keep it at 2 on an 8 GB GPU: each parallel slot reserves its own context
+window of memory. The scores do not depend on this setting.
+
+### Context window (`ollama.num_ctx`)
+
+Ollama's default context window is 4,096 tokens, and it silently cuts longer
+prompts. HaluBench covidQA prompts reach ~6,500 tokens, so in the first full
+run every model and the judge saw a truncated context on that dataset.
+`ollama.num_ctx: 8192` in config.yaml now applies to every request
+(generators, judge, SelfCheckGPT's prompt scorer), and the preflight checks
+that the longest prompt in the data fits each model and the judge. A prompt
+that may not have fit during the run is logged as a warning and counted in
+`score_completeness.json` (`prompts_possibly_cut`).
 
 ## Sending the errors when something fails
 

@@ -25,20 +25,37 @@ class SampleBank:
         self.n_samples = n_samples
         self.temperature = temperature
         self._samples: Dict[Tuple[str, str], List[str]] = {}
+        # A failed draw is remembered: every later request for the same
+        # samples reports that failure instead of asking the model again (in
+        # the phased run the model is no longer loaded when the detectors ask).
+        self._failed: Dict[Tuple[str, str], str] = {}
 
     def get(self, generator, question: str, context: str) -> List[str]:
         prompt = grounded_prompt(question, context)
         key = (getattr(generator, "name", repr(generator)), prompt)
+        if key in self._failed:
+            raise RuntimeError(f"samples could not be drawn: {self._failed[key]}")
         if key not in self._samples:
-            if hasattr(generator, "sample_n"):
-                samples = generator.sample_n(prompt, n=self.n_samples, temperature=self.temperature)
-            else:
-                samples = generator.generate_batch([prompt] * self.n_samples, temperature=self.temperature)
-            if len(samples) != self.n_samples or any(not isinstance(s, str) or not s.strip() for s in samples):
-                raise RuntimeError(f"Generator must return {self.n_samples} nonempty samples; "
-                                   f"received {len(samples)} samples (including any empty responses)")
+            try:
+                if hasattr(generator, "sample_n"):
+                    samples = generator.sample_n(prompt, n=self.n_samples, temperature=self.temperature)
+                else:
+                    samples = generator.generate_batch([prompt] * self.n_samples, temperature=self.temperature)
+                if len(samples) != self.n_samples or any(not isinstance(s, str) or not s.strip() for s in samples):
+                    raise RuntimeError(f"Generator must return {self.n_samples} nonempty samples; "
+                                       f"received {len(samples)} samples (including any empty responses)")
+            except Exception as exc:
+                self._failed[key] = f"{type(exc).__name__}: {str(exc).strip() or repr(exc)}"
+                raise
             self._samples[key] = samples
         return self._samples[key]
+
+    def mark_failed(self, generator, question: str, context: str, reason: str) -> None:
+        """Record that these samples will not be drawn (e.g. the model was
+        stopped after repeated failures)."""
+        key = (getattr(generator, "name", repr(generator)), grounded_prompt(question, context))
+        if key not in self._samples:
+            self._failed[key] = reason
 
     @contextmanager
     def evidence(self, generator, question: str, context: str, samples: List[str]):
@@ -58,6 +75,7 @@ class SampleBank:
     def reset(self) -> None:
         """Forget drawn samples so the next run samples independently."""
         self._samples.clear()
+        self._failed.clear()
 
     def export(self, path: Path) -> int:
         path.parent.mkdir(parents=True, exist_ok=True)

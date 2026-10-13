@@ -69,13 +69,14 @@ def _sentence_transformer_on(device: Optional[str]):
 
 class UQLMConsistencyDetector:
     def __init__(self, bank: SampleBank, scorers: Sequence[str] = CONSISTENCY_SCORERS,
-                 device: Optional[str] = None):
+                 device: Optional[str] = None, nli_batch_size: int = 32):
         unknown = set(scorers) - set(CONSISTENCY_SCORERS)
         if unknown or not scorers:
             raise ValueError(f"UQLM scorers must be among {CONSISTENCY_SCORERS}, got {list(scorers)}")
         self.bank = bank
         self.scorers = list(scorers)
         self.device = device
+        self.nli_batch_size = int(nli_batch_size)
         self._uq = None
 
     def _load(self):
@@ -86,7 +87,12 @@ class UQLMConsistencyDetector:
         except ImportError as exc:
             raise RuntimeError("UQLM is not installed: pip install -r requirements.txt") from exc
         with contextlib.redirect_stdout(io.StringIO()), _sentence_transformer_on(self.device):
-            self._uq = BlackBoxUQ(scorers=self.scorers, device=self.device, use_best=False)
+            self._uq = BlackBoxUQ(scorers=self.scorers, device=self.device, use_best=False,
+                                  nli_batch_size=self.nli_batch_size)
+
+    def release(self) -> None:
+        """Drop UQLM's models from memory; loaded again on next use."""
+        self._uq = None
 
     def shared_nli(self):
         """The NLI model UQLM loaded for these scorers, so the best-response
@@ -108,10 +114,11 @@ class UQLMConsistencyDetector:
 
 class UQLMJudgeDetector:
     def __init__(self, judge_model: str, host: str = "http://localhost:11434",
-                 scoring_template: str = "true_false_uncertain"):
+                 scoring_template: str = "true_false_uncertain", num_ctx: Optional[int] = None):
         self.judge_model = judge_model
         self.host = host
         self.scoring_template = scoring_template
+        self.num_ctx = num_ctx
         self._judge = None
 
     def _load(self):
@@ -122,7 +129,11 @@ class UQLMJudgeDetector:
             from uqlm.judges import LLMJudge
         except ImportError as exc:
             raise RuntimeError("UQLM / langchain-ollama not installed: pip install -r requirements.txt") from exc
-        llm = ChatOllama(model=self.judge_model, base_url=self.host, temperature=0)
+        # The same num_ctx as every other request to the judge model: a
+        # different value would make Ollama reload it, and the default (4096)
+        # cuts the longest prompts.
+        extra = {"num_ctx": int(self.num_ctx)} if self.num_ctx else {}
+        llm = ChatOllama(model=self.judge_model, base_url=self.host, temperature=0, **extra)
         self._judge = LLMJudge(llm=llm, scoring_template=self.scoring_template)
         self._loop = asyncio.new_event_loop()
 

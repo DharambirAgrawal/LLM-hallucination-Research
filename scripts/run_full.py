@@ -46,6 +46,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+os.environ["MPLBACKEND"] = "Agg"   # reports only write files (see main.py)
 from utils import console  # noqa: E402
 
 # Detector groups, in run order. "python" lists interpreters to build the
@@ -341,15 +342,20 @@ def main() -> None:
             console.line("Preflight projection for all detector groups; report writing takes additional time.")
         else:
             console.kv("estimated time", "UNAVAILABLE · see the preflight timing message above")
-        core_ok = True
         run_ok = False
         failed_groups = []
         for index, name in enumerate(groups, 1):
             console.section(f"{run_name} · [{index}/{total}] {name}")
             # Phase 1 already checked this group; run only this repetition.
             cmd = [*main_args(name, run_index), "--skip-preflight"]
-            if name != "core" and reduce_on and core_ok:
+            # Score core's reduction answers whenever core wrote them: a core
+            # run with a few recorded failures still produced every other answer
+            # (the first full run skipped this over 1 missing score in 2,835).
+            answers_file = run_dir / "core" / "reduction_comparison.csv"
+            if name != "core" and reduce_on and answers_file.is_file():
                 cmd += ["--score-reduction-from", str(output_dir)]
+            elif name != "core" and reduce_on:
+                console.line(f"⚠ {answers_file} is missing: {name} scores Stage A only in {run_name}")
             group_started = time.monotonic()
             code = subprocess.run([str(pythons[name]), "main.py", *cmd], cwd=ROOT, env=env).returncode
             seconds = time.monotonic() - group_started
@@ -360,10 +366,6 @@ def main() -> None:
             else:
                 results.append((label, f"failed (exit {code}) — see {log_dir / f'{name}.log'}", seconds))
                 failed_groups.append(name)
-                if name == "core" and reduce_on:
-                    core_ok = False
-                    console.line("⚠ core failed in this run: the other groups run Stage A only "
-                                 "(there are no complete reduction answers to score)")
 
         if not args.skip_report:
             console.section(f"{run_name} · Reports")

@@ -140,7 +140,10 @@ class FullRunSequenceTests(unittest.TestCase):
             events.append(("worker", index, name))
             folder = root / f"run_{index:02d}" / name
             folder.mkdir(parents=True)
-            return types.SimpleNamespace(returncode=1 if failure == (index, name) else 0)
+            failed = failure == (index, name)
+            if name == "core" and not failed:   # a core run writes its reduction answers
+                (folder / "reduction_comparison.csv").write_text("sample_id,model,condition,answer\n")
+            return types.SimpleNamespace(returncode=1 if failed else 0)
 
         def report(source, out_dir=None, title=None):
             folder = out_dir or source
@@ -191,7 +194,9 @@ class FullRunSequenceTests(unittest.TestCase):
         expected.append(("report", "combined"))
         self.assertEqual(events, expected)
 
-    def test_failed_core_only_disables_reduction_scoring_in_its_own_run(self):
+    def test_reduction_scoring_follows_cores_answer_file_per_run(self):
+        """The other groups score core's reduction answers whenever core
+        wrote them; a core run that wrote nothing disables it for that run only."""
         with tempfile.TemporaryDirectory() as temp:
             _, commands, titles = self.exercise(Path(temp), failure=(1, "core"))
         for name in GROUPS[1:]:

@@ -8,6 +8,11 @@ with them; with the reduction stage on, every reduction method runs once per
 model and all its answers are scored. If anything fails, the run stops here
 with the reason for each failure, instead of hours later.
 
+The checks follow the run's phases (benchmark/phased.py): per model, first
+everything that needs the model, then the detectors on the GPU, then the
+judge. The preflight also checks that the longest prompt in the data fits
+every model's context window (ollama.num_ctx).
+
 The timings give the estimate printed before the long part. Preflight is a
 separate check: main.py discards its samples before the measured runs.
 """
@@ -44,6 +49,25 @@ class Preflight:
         seconds = time.monotonic() - started
         console.line(f"✓ {label:<34} {detail} ({console.duration(seconds)})")
         return seconds
+
+
+def _parts(fam) -> tuple:
+    return tuple(getattr(fam, "parts", ("torch",)))
+
+
+def _cols(fam, part) -> list:
+    return fam.columns_for(part) if hasattr(fam, "columns_for") else fam.columns
+
+
+def _run(fam, case, generator, part):
+    return fam.run(case, generator, part) if hasattr(fam, "run") else fam.score(case, generator)
+
+
+def _turn(runner, action: str) -> None:
+    """park / unpark / release_judge, when the runner shares a GPU."""
+    method = getattr(runner, action, None)
+    if callable(method):
+        method()
 
 
 def _fmt(scores: Dict[str, object]) -> str:
@@ -89,7 +113,7 @@ def run_preflight(
     case_a = cases[0]
     case_b = cases[1] if len(cases) > 1 else cases[0]
     n_questions, n_cases = len(samples), len(all_cases)
-    estimate = {"detector_validation": 0.0, "reduction": 0.0}
+    estimate: Dict[str, float] = {}
     fixed_seconds = 0.0
     fixed_startup = 0.0
     generator_loading = 0.0
@@ -98,89 +122,151 @@ def run_preflight(
     reducer = None
 
     # Generator-independent detectors: the first call loads (and downloads)
-    # the model, the second gives the per-case time.
+    # the model, the second gives the per-case time. Each in its own turn on
+    # the GPU, as in the run (benchmark/phased.py).
     fixed = [f for f in runner.families.values() if not f.needs_generator]
     for fam in fixed:
-        loaded = pf.check(f"{fam.name} loads + scores", lambda f=fam: _fmt(require_scores(f.score(case_a, None), f.columns)))
+        part = _parts(fam)[0]
+        phase = "judge_scoring" if part == "judge" else "detector_scoring"
+        if part == "torch":
+            _turn(runner, "unpark")
+        loaded = pf.check(f"{fam.name} loads + scores",
+                          lambda f=fam, p=part: _fmt(require_scores(_run(f, case_a, None, p), _cols(f, p))))
         if loaded is not None:
-            per_case = pf.check(f"{fam.name} timing", lambda f=fam: _fmt(require_scores(f.score(case_b, None), f.columns)))
-            estimate["detector_validation"] += (per_case or 0) * n_cases
+            per_case = pf.check(f"{fam.name} timing",
+                                lambda f=fam, p=part: _fmt(require_scores(_run(f, case_b, None, p), _cols(f, p))))
+            estimate[phase] = estimate.get(phase, 0.0) + (per_case or 0) * n_cases
             fixed_seconds += per_case or 0
             fixed_startup += max(0.0, loaded - (per_case or 0))
             probe_timings[fam.name] = {"first_score_seconds": loaded, "warm_score_seconds": per_case}
+        _turn(runner, "park")
+    _turn(runner, "release_judge")
 
     sampling = [f for f in runner.families.values() if f.needs_generator]
+    longest = max(samples, key=lambda s: len(s.question) + len(s.context))
+    num_ctx = config.get("ollama", {}).get("num_ctx")
+    if num_ctx:
+        from models.prompts import grounded_prompt
+        longest_prompt = grounded_prompt(longest.question, longest.context)
+    judge_tag = (config.get("judge") or {}).get("model")
+    uses_ollama = any(hasattr(g, "prompt_tokens") for g in generators)   # real Ollama models
+    if num_ctx and judge_tag and uses_ollama and any("judge" in _parts(f) for f in runner.families.values()):
+        def judge_fits() -> str:
+            from models.ollama_model import OllamaModel
+            judge = OllamaModel("judge", {"model": judge_tag, "num_ctx": num_ctx, "timeout": 600},
+                                config.get("ollama", {}).get("host", "http://localhost:11434"))
+            # the judge sees the grounded prompt, the answer and its template
+            answer = max((c["answer"] for c in all_cases), key=len)
+            used = judge.prompt_tokens(longest_prompt + "\n\n" + answer)
+            judge.release()
+            if used is None:
+                return "token count not reported; not checked"
+            if used + 256 > int(num_ctx):
+                raise RuntimeError(f"the longest judge prompt has ~{used} tokens; it needs num_ctx ≥ "
+                                   f"{used + 256} (now {num_ctx}). Raise ollama.num_ctx in config.yaml")
+            return f"longest prompt + answer {used} tokens ≤ num_ctx {num_ctx}"
+        pf.check(f"judge {judge_tag} context window", judge_fits)
+    if reduce_on and generators:
+        # Loaded while Ollama holds no model (UQLM's NLI, BERTScore and
+        # embedding models, ~3 GB), then released until the detectors' turn.
+        from benchmark.reduction_runner import ReductionRunner
+
+        def load_reducer() -> str:
+            nonlocal reducer
+            reducer = ReductionRunner(config, runner)
+            best = getattr(reducer, "_best", None)
+            if best is not None:
+                best._load()  # separate lazy model loading from per-question inference
+                runner.extra_torch_holders = [best]
+            _turn(runner, "park")
+            return "ready (loading counted once per run)"
+        startup = pf.check("reduction tools load", load_reducer)
+        estimate["reducer_loading"] = startup or 0
+
     for g in generators:
+        # ── 1. generate (the run's first phase: Ollama holds only this model)
+        _turn(runner, "park")
         answered = pf.check(f"{g.name} answers",
                             lambda g=g: f"{len(g.generate('Reply with one short sentence: what is 2 + 2?'))} chars")
         if answered is None:
             continue
-        # The run releases each generator after validation and again after
-        # reduction. Use its first answer as a rough restart allowance rather
-        # than multiplying one cold load by every question.
-        generator_loading += answered * (2 if reduce_on else 1)
+        generator_loading += answered
+        if num_ctx and hasattr(g, "prompt_tokens"):
+            def fits(g=g):
+                used = g.prompt_tokens(longest_prompt)
+                room = int(num_ctx) - int(getattr(g, "max_tokens", 512))
+                if used is None:
+                    return "token count not reported; not checked"
+                if used > room:
+                    raise RuntimeError(f"the longest prompt ({longest.dataset}) has {used} tokens; with "
+                                       f"{g.max_tokens} answer tokens it needs num_ctx ≥ {used + g.max_tokens} "
+                                       f"(now {num_ctx}). Raise ollama.num_ctx in config.yaml")
+                return f"longest prompt {used} tokens + {g.max_tokens} answer ≤ num_ctx {num_ctx}"
+            pf.check(f"{g.name} context window", fits)
         drawn = pf.check(f"{g.name} samples",
                          lambda g=g: f"{len(runner.bank.get(g, first.question, first.context))} samples")
-        if drawn is None or not sampling:
-            continue
-        scored = []
-        for fam in sampling:
-            def run_case(case, f=fam, g=g):
-                values = require_scores(f.score(case, g), f.columns)
-                return _fmt(values)
-            t1 = pf.check(f"{g.name} · {fam.name}", lambda: run_case(case_a))
-            t2 = pf.check(f"{g.name} · {fam.name} timing", lambda: run_case(case_b)) \
-                if t1 is not None else None
-            scored.append(t2 or 0)
-            if fam.name not in probe_timings:
-                sampling_startup += max(0.0, (t1 or 0) - (t2 or 0))
-                probe_timings[fam.name] = {"first_score_seconds": t1, "warm_score_seconds": t2}
-        # Per question: draw samples once; per labeled case: every scorer.
-        estimate["detector_validation"] += drawn * n_questions + sum(scored) * n_cases
-
-        if reduce_on and not pf.failures:
-            from benchmark.reduction_runner import ReductionRunner
-
-            if reducer is None:
-                def load_reducer() -> str:
-                    nonlocal reducer
-                    reducer = ReductionRunner(config, runner)
-                    best = getattr(reducer, "_best", None)
-                    if best is not None:
-                        best._load()  # separate lazy model loading from per-question inference
-                    return "ready (loading counted once per run)"
-
-                startup = pf.check("reduction tools load", load_reducer)
-                estimate["reducer_loading"] = startup or 0
-            if pf.failures:
-                if hasattr(g, "release"):
-                    g.release()
-                continue
-
-            def reduction_round(g=g) -> str:
-                answers = reducer._produce(g, first)
-                errors = {k: v["error"] for k, v in answers.items() if v["error"]}
-                if errors:
-                    raise RuntimeError("; ".join(f"{k}: {v}" for k, v in errors.items()))
-                for cond, item in answers.items():
-                    # the same scoring path as the run, incl. leave-one-out
-                    row = reducer._score({"case_id": f"preflight:{cond}", "question": first.question,
-                                          "context": first.context, "answer": item["answer"]},
-                                         g, cond, item, answers)
-                    failed = {k: v for k, v in row.items()
-                              if k.endswith("_error") and v}
-                    if failed:
-                        raise RuntimeError(f"scoring {cond}: {failed}")
-                    for fam in runner.families.values():
-                        require_scores({col: row.get(f"{col}_score") for col in fam.columns}, fam.columns)
-                return f"{len(answers)} answers ({', '.join(answers)}) produced and scored"
-
-            reduced = pf.check(f"{g.name} reduction round", reduction_round)
-            estimate["reduction"] += (reduced or 0) * n_questions
-        # free Ollama's memory for the next model and the detectors
+        produced = None
+        if reduce_on and drawn is not None:
+            if reducer is not None:
+                def generate_round(g=g) -> str:
+                    nonlocal produced
+                    produced = reducer.produce_generated(g, first)
+                    errors = {k: v["error"] for k, v in produced.items() if v["error"]}
+                    if errors:
+                        raise RuntimeError("; ".join(f"{k}: {v}" for k, v in errors.items()))
+                    return f"{len(produced)} answers ({', '.join(produced)})"
+                generated = pf.check(f"{g.name} reduction answers", generate_round)
+                estimate["generation"] = estimate.get("generation", 0.0) + (generated or 0) * n_questions
+        if drawn is not None:
+            estimate["generation"] = estimate.get("generation", 0.0) + drawn * n_questions
         if hasattr(g, "release"):
             g.release()
+        if drawn is None or not sampling:
+            continue
 
+        # ── 2. detectors (GPU, Ollama empty) and 3. judge (Ollama: judge only)
+        for part, phase in (("torch", "detector_scoring"), ("judge", "judge_scoring")):
+            fams = [f for f in sampling if part in _parts(f)]
+            if not any(part in _parts(f) for f in runner.families.values()):
+                continue
+            if part == "torch":
+                _turn(runner, "unpark")
+            for fam in fams:
+                def run_case(case, f=fam, g=g, p=part):
+                    return _fmt(require_scores(_run(f, case, g, p), _cols(f, p)))
+                name = fam.name if len(_parts(fam)) == 1 else f"{fam.name} ({part})"
+                t1 = pf.check(f"{g.name} · {name}", lambda: run_case(case_a))
+                t2 = pf.check(f"{g.name} · {name} timing", lambda: run_case(case_b)) if t1 is not None else None
+                estimate[phase] = estimate.get(phase, 0.0) + (t2 or 0) * n_cases
+                key = f"{fam.name}:{part}"
+                if key not in probe_timings:
+                    sampling_startup += max(0.0, (t1 or 0) - (t2 or 0))
+                    probe_timings[key] = {"first_score_seconds": t1, "warm_score_seconds": t2}
+            if reducer is not None and produced is not None and not pf.failures:
+                def score_round(g=g, p=part) -> str:
+                    if p == "torch":
+                        reducer.select_best(g, first, produced)
+                        if produced.get("uqlm_best_response", {}).get("error"):
+                            raise RuntimeError(f"uqlm_best_response: {produced['uqlm_best_response']['error']}")
+                    for cond in reducer.conditions():
+                        item = produced[cond]
+                        # the same scoring path as the run, incl. leave-one-out
+                        row = reducer._score({"case_id": f"preflight:{cond}", "question": first.question,
+                                              "context": first.context, "answer": item["answer"]},
+                                             g, cond, item, produced, p)
+                        failed = {k: v for k, v in row.items() if k.endswith("_error") and v}
+                        if failed:
+                            raise RuntimeError(f"scoring {cond}: {failed}")
+                        for fam in runner.families.values():
+                            if p in _parts(fam):
+                                cols = _cols(fam, p)
+                                require_scores({col: row.get(f"{col}_score") for col in cols}, cols)
+                    return f"{len(reducer.conditions())} answers scored"
+                scored = pf.check(f"{g.name} reduction scoring ({part})", score_round)
+                estimate[phase] = estimate.get(phase, 0.0) + (scored or 0) * n_questions
+            _turn(runner, "park")
+            if part == "judge":
+                _turn(runner, "release_judge")
     if pf.failures:
         console.section("Preflight failed · nothing long was started")
         for failure in pf.failures:
@@ -191,7 +277,9 @@ def run_preflight(
     if reduction_answers_per_question:
         estimate["reduction_scoring"] = fixed_seconds * n_questions * reduction_answers_per_question
     if generator_loading:
-        estimate["generator_restarts"] = generator_loading
+        # each model is loaded once per run (generate phase); the judge and
+        # the detector models are moved in and out once per model
+        estimate["model_loading"] = generator_loading
     if sampling_startup:
         estimate["sampling_detector_loading"] = sampling_startup
     # Separate worker processes must reload fixed detectors; a standalone

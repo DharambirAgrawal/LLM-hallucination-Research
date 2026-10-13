@@ -28,6 +28,8 @@ import re
 from dataclasses import dataclass, field
 from typing import List
 
+from models.answer_cleanup import strip_commentary
+
 MAX_QUESTIONS = 5
 
 
@@ -38,6 +40,7 @@ class CoVeResult:
     verification_questions: List[str] = field(default_factory=list)
     verification_answers: List[str] = field(default_factory=list)
     n_calls: int = 0
+    commentary_removed: bool = False   # see models/answer_cleanup.py
 
 
 class ChainOfVerificationReducer:
@@ -101,9 +104,9 @@ class ChainOfVerificationReducer:
         for vq in questions:  # factored: each in its own call, without the draft
             answers.append(self.model.generate(self._verify_prompt(context, vq), temperature=self.temperature).strip())
             calls += 1
-        final = self.model.generate(
+        final, removed = strip_commentary(self.model.generate(
             self._final_prompt(question, context, initial_answer, list(zip(questions, answers))),
             temperature=self.temperature,
-        ).strip()
+        ).strip())
         calls += 1
-        return CoVeResult(initial_answer, final, questions, answers, calls)
+        return CoVeResult(initial_answer, final, questions, answers, calls, removed)

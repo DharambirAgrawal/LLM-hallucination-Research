@@ -38,6 +38,10 @@ class SummaCDetector:
         self.conv_weights = conv_weights
         self._model = None
 
+    def release(self) -> None:
+        """Drop the model from memory; loaded again on next use."""
+        self._model = None
+
     def _load(self):
         if self._model is not None:
             return

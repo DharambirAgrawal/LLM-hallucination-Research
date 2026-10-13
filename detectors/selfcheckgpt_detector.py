@@ -39,10 +39,23 @@ formula. Other samples still use upstream unchanged. No samples are redrawn,
 discarded, or replaced. This preprocessing repair is recorded in the report
 and manifest; it is an adaptation on these edge cases, not exact upstream
 preprocessing.
+
+The prompt scorer's request is routed, not changed: upstream
+SelfCheckAPIPrompt sends each (sample, sentence) prompt through its
+``completion(prompt)`` method to an OpenAI client at temperature 0 with 5
+output tokens. Here ``completion`` sends the same message with the same
+settings to the local Ollama server's native API, adding the run's context
+window (num_ctx; the OpenAI-compatible endpoint cannot set it, and a
+different value makes Ollama reload the judge between requests). A prompt that
+was already sent is answered from memory instead of again (temperature 0:
+same prompt, same answer); identical sentences recur when a reduction method
+keeps sentences of the baseline answer.
 """
 from __future__ import annotations
 
 import contextlib
+import threading
+from collections import OrderedDict
 import io
 import os
 import re
@@ -102,6 +115,8 @@ class SelfCheckGPTDetector:
         judge_host: str = "http://localhost:11434",
         bank: Optional[SampleBank] = None,
         thresholds: Optional[Dict[str, float]] = None,
+        judge_num_ctx: Optional[int] = None,
+        judge_parallel: int = 1,
     ):
         self.methods = [method] if isinstance(method, str) else list(method)
         unknown = set(self.methods) - set(METHODS)
@@ -119,11 +134,31 @@ class SelfCheckGPTDetector:
         self.judge_model = judge_model
         self.judge_host = judge_host
         self.bank = bank or SampleBank(n_samples, temperature)
+        self.judge_num_ctx = judge_num_ctx
+        self.judge_parallel = max(1, int(judge_parallel))
+        self._judge_lock = threading.Lock()
         self._scorers: Dict[str, object] = {}
         self._nlp = None
+        self._bert = None                      # the _LoadedBERTScore in use (torch models live there)
+        self._judge_cache: "OrderedDict[str, str]" = OrderedDict()
+        self._judge_client = None
+
+    TORCH_METHODS = ("bertscore", "nli")
+
+    def release(self) -> None:
+        """Drop the torch models (BERTScore, NLI) from memory; they are
+        loaded again on next use. The n-gram scorer and the prompt scorer
+        (and its memory of judge answers) stay."""
+        for method in self.TORCH_METHODS:
+            self._scorers.pop(method, None)
+        if self._bert is not None:
+            # upstream's module also points at this object: empty it, so the
+            # BERTScore model is really freed
+            self._bert._scorers.clear()
+        self._bert = None
 
     def _load(self):
-        if self._scorers:
+        if all(method in self._scorers for method in self.methods):
             return
         try:
             import selfcheckgpt.modeling_selfcheck as upstream
@@ -139,11 +174,14 @@ class SelfCheckGPTDetector:
         # Upstream prints status lines on construction; keep them off screen.
         with contextlib.redirect_stdout(io.StringIO()):
             for method in self.methods:
+                if method in self._scorers:
+                    continue
                 if method == "ngram":
                     self._scorers[method] = SelfCheckNgram(n=1)
                 elif method == "bertscore":
                     self._scorers[method] = SelfCheckBERTScore(rescale_with_baseline=True)
-                    upstream.bert_score = _LoadedBERTScore(self.device)   # see module docstring
+                    self._bert = _LoadedBERTScore(self.device)
+                    upstream.bert_score = self._bert   # see module docstring
                 elif method == "nli":
                     self._scorers[method] = SelfCheckNLI(device=self.device)
                 elif method == "prompt":
@@ -152,7 +190,58 @@ class SelfCheckGPTDetector:
                     # point it at the local Ollama server's OpenAI-compatible API.
                     os.environ["OPENAI_BASE_URL"] = f"{self.judge_host.rstrip('/')}/v1"
                     os.environ.setdefault("OPENAI_API_KEY", "ollama")
-                    self._scorers[method] = SelfCheckAPIPrompt(client_type="openai", model=self.judge_model)
+                    scorer = SelfCheckAPIPrompt(client_type="openai", model=self.judge_model)
+                    scorer.completion = self._judge_completion   # see module docstring
+                    self._scorers[method] = scorer
+
+    JUDGE_CACHE_SIZE = 200_000
+
+    def _judge_completion(self, prompt: str) -> str:
+        """Upstream SelfCheckAPIPrompt.completion's request (temperature 0,
+        5 output tokens, the prompt as one user message) to Ollama's native
+        chat API with this run's num_ctx; repeated prompts come from memory."""
+        with self._judge_lock:
+            cached = self._judge_cache.get(prompt)
+            if cached is not None:
+                self._judge_cache.move_to_end(prompt)
+                return cached
+        text = self._judge_request(prompt)
+        with self._judge_lock:
+            self._judge_cache[prompt] = text
+            if len(self._judge_cache) > self.JUDGE_CACHE_SIZE:
+                self._judge_cache.popitem(last=False)
+        return text
+
+    def _judge_request(self, prompt: str) -> str:
+        if self._judge_client is None:
+            import ollama
+            self._judge_client = ollama.Client(host=self.judge_host, timeout=600)
+        options = {"temperature": 0.0, "num_predict": 5}
+        if self.judge_num_ctx:
+            options["num_ctx"] = int(self.judge_num_ctx)
+        response = self._judge_client.chat(model=self.judge_model,
+                                           messages=[{"role": "user", "content": prompt}],
+                                           options=options, stream=False)
+        return response["message"]["content"] or ""
+
+    def _prefetch_judge(self, scorer, sentences: List[str], samples: List[str]) -> None:
+        """Send the prompts upstream predict() is about to send, `judge_parallel`
+        at a time, so its sequential completion() calls find the answers in
+        memory. Built exactly as upstream builds them (newlines in a sample
+        become spaces); a prompt built differently would just be sent again by
+        upstream, so this can only save time, never change a score."""
+        template = getattr(scorer, "prompt_template", None)
+        if self.judge_parallel < 2 or not template:
+            return
+        prompts = list(dict.fromkeys(template.format(context=sample.replace("\n", " "), sentence=sentence)
+                                     for sentence in sentences for sample in samples))
+        with self._judge_lock:
+            missing = [p for p in prompts if p not in self._judge_cache]
+        if len(missing) < 2:
+            return
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=self.judge_parallel) as pool:
+            list(pool.map(self._judge_completion, missing))
 
     def _sentences(self, answer: str) -> List[str]:
         """Split the response the way the upstream README does:
@@ -180,6 +269,7 @@ class SelfCheckGPTDetector:
                 result = scorer.predict(sentences=sentences, passage=answer, sampled_passages=samples)
                 values = result["sent_level"]["avg_neg_logprob"]
             elif method == "prompt":
+                self._prefetch_judge(scorer, sentences, samples)
                 values = scorer.predict(sentences=sentences, sampled_passages=samples, verbose=False)
             elif method == "bertscore":
                 values = self._bertscore(sentences, samples)
@@ -228,9 +318,12 @@ class SelfCheckGPTDetector:
         context: str,
         answer: str,
         model: Optional["BaseModel"] = None,
+        methods: Optional[Sequence[str]] = None,
     ) -> SelfCheckGPTResult:
-        """Score one answer with every configured method. `model` overrides
-        the constructor's generator for this call only."""
+        """Score one answer with every configured method, or with `methods`
+        only (the run scores the torch methods and the prompt method in
+        separate phases). `model` overrides the constructor's generator for
+        this call only."""
         self._load()
         if not answer.strip():
             # No neutral score exists: n-gram scores are unbounded, so a
@@ -248,7 +341,7 @@ class SelfCheckGPTDetector:
         # Preserve other scores if one scorer fails; completeness checks
         # reject the run, with the original per-scorer reason retained.
         scores, errors, first_values = {}, {}, []
-        for method in self.methods:
+        for method in (self.methods if methods is None else [m for m in self.methods if m in methods]):
             try:
                 values = self._score_one(method, sentences, answer, samples)
                 if not values or not np.isfinite(values).all():
@@ -261,7 +354,7 @@ class SelfCheckGPTDetector:
                 first_values = values
         if not scores:
             raise RuntimeError("; ".join(f"{m}: {e}" for m, e in errors.items()))
-        score = scores.get(self.method, float("nan"))
+        score = scores.get(self.method, next(iter(scores.values())))
         return SelfCheckGPTResult(
             score=score,
             is_hallucinated=score >= self.thresholds.get(self.method, self.threshold),

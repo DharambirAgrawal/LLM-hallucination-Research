@@ -83,6 +83,8 @@ class ModelFactory:
         ollama_cfg  = config.get("ollama", {})
         host        = ollama_cfg.get("host", "http://localhost:11434")
         timeout     = ollama_cfg.get("timeout", 120)
+        num_ctx     = ollama_cfg.get("num_ctx")
+        parallel    = ollama_cfg.get("parallel", 1)
         selected    = set(config.get("selected_models") or [])
 
         model_configs = config.get("models", [])
@@ -129,7 +131,8 @@ class ModelFactory:
                 continue
 
             info = installed.get(installed_tag, {})
-            cfg = {**cfg, "host": host, "timeout": timeout, "digest": info.get("digest")}
+            cfg = {"num_ctx": num_ctx, "parallel": parallel, **cfg, "host": host, "timeout": timeout,
+                   "digest": info.get("digest")}
             try:
                 m = OllamaModel(name=name, config=cfg, ollama_host=host)
                 m.parameter_size = info.get("parameter_size")

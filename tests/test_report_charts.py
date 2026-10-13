@@ -201,7 +201,7 @@ class ReportChartTests(unittest.TestCase):
                                   result["report (html)"].read_text(encoding="utf-8"))
                     self.assertIn("all detector scores were recomputed", html)
                     self.assertNotIn("Run independence is unverified", html)
-                    self.assertIn("All expected answer rows and finite detector scores passed", html)
+                    self.assertIn("every detector score is present and finite", html)
 
     def test_complete_smoke_matrix_from_real_csvs_and_group_merges(self):
         """Full configured dimensions, real CSV loading/joins/plots/HTML.

@@ -8,12 +8,6 @@ from __future__ import annotations
 import subprocess
 from typing import Optional, Tuple
 
-# Below this, `device: auto` leaves the GPU to Ollama. The detectors' torch
-# models take ~6 GB together (SelfCheckGPT NLI + BERTScore, UQLM NLI +
-# BERTScore + cosine); a 7B generator or the judge takes 4-5 GB more.
-AUTO_GPU_MIN_GIB = 16
-
-
 def nvidia_gpu() -> Optional[Tuple[str, float]]:
     """(name, total GiB) of the largest NVIDIA GPU, or None if there is none."""
     try:

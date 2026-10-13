@@ -44,6 +44,10 @@ class OllamaModel(BaseModel):
       - max_tokens:  max tokens to generate (default 512)
       - think:       reasoning setting for thinking models (false, true,
                      or "low"/"medium"/"high" for gpt-oss); omitted if unset
+      - num_ctx:     context window in tokens (ollama.num_ctx). Ollama's
+                     default (4096) silently cuts longer prompts; the same
+                     value must be used for every request to a model, or
+                     Ollama reloads it.
     """
 
     _THINK_BLOCK = re.compile(r"<think>.*?(</think>|$)", re.DOTALL | re.IGNORECASE)
@@ -65,6 +69,9 @@ class OllamaModel(BaseModel):
         self.family      = config.get("family", "unknown")
         self.think       = config.get("think")
         self.digest      = config.get("digest")
+        self.num_ctx     = config.get("num_ctx")
+        self.parallel    = max(1, int(config.get("parallel") or 1))   # concurrent sample requests
+        self.truncated   = 0     # prompts that may not have fit num_ctx (see _chat)
 
         # Build ollama client pointed at the right host. `timeout` bounds
         # every HTTP request so a stuck server cannot hang the run forever.
@@ -84,12 +91,16 @@ class OllamaModel(BaseModel):
     def sample_n(self, prompt: str, n: int = 5, temperature: float = 1.0) -> List[str]:
         """
         Generate N stochastic samples (used by SelfCheckGPT).
-        Uses high temperature for diversity.
+        Uses high temperature for diversity. With ollama.parallel > 1 the N
+        independent requests are sent concurrently; the Ollama server then
+        answers them together if OLLAMA_NUM_PARALLEL allows it (otherwise it
+        queues them, as before). Each sample is an independent draw either way.
         """
-        return [
-            self._chat(prompt, temperature=temperature)
-            for _ in range(n)
-        ]
+        if self.parallel < 2 or n < 2:
+            return [self._chat(prompt, temperature=temperature) for _ in range(n)]
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(self.parallel, n)) as pool:
+            return list(pool.map(lambda _: self._chat(prompt, temperature=temperature), range(n)))
 
     # ── internal ─────────────────────────────────────────────
 
@@ -107,6 +118,8 @@ class OllamaModel(BaseModel):
             "num_predict": max_tokens,
             "stop":        ["\n\nHuman:", "\n\nUser:"],
         }
+        if self.num_ctx:
+            options["num_ctx"] = int(self.num_ctx)
         if "top_p" in kwargs:
             options["top_p"] = kwargs["top_p"]
         if "top_k" in kwargs:
@@ -142,16 +155,51 @@ class OllamaModel(BaseModel):
                 time.sleep(wait)
                 continue
 
+            self._check_fit(response, options["num_predict"])
             text = self._THINK_BLOCK.sub("", response["message"]["content"] or "").strip()
             if text:
                 return text
             last_error = (
                 "empty answer (a reasoning model may have spent all "
-                f"{max_tokens} tokens thinking; raise max_tokens or set think)"
+                f"{options['num_predict']} tokens thinking; raise max_tokens or set think)"
             )
             logger.debug(f"[{self.name}] attempt {attempt + 1}/3: {last_error}")
+            # A reasoning model that thought until the budget ran out gets a
+            # larger budget on the next attempt, instead of failing the same way.
+            if self.think is not None:
+                options["num_predict"] = int(options["num_predict"]) * 2
 
         raise RuntimeError(self._explain(last_error))
+
+    def _check_fit(self, response, num_predict: int) -> None:
+        """Warn when the prompt may not have fit the context window: Ollama
+        then drops part of it without an error. prompt_eval_count leaves out
+        a prefix Ollama reused from the previous request, so this can miss a
+        cut but never reports one that did not happen."""
+        if not self.num_ctx:
+            return
+        try:
+            used = response.get("prompt_eval_count") if hasattr(response, "get") else None
+            used = used if used is not None else getattr(response, "prompt_eval_count", None)
+        except Exception:
+            used = None
+        if used and used + num_predict > int(self.num_ctx):
+            self.truncated += 1
+            logger.warning(f"[{self.name}] prompt of {used} tokens + {num_predict} answer tokens exceeds "
+                           f"num_ctx={self.num_ctx}: part of the prompt or answer may be cut; raise "
+                           "ollama.num_ctx in config.yaml")
+
+    def prompt_tokens(self, prompt: str) -> Optional[int]:
+        """Tokens this model's tokenizer gives `prompt` (one 1-token
+        generation; used by the preflight to check the longest prompt fits)."""
+        options = {"temperature": 0.0, "num_predict": 1}
+        if self.num_ctx:
+            options["num_ctx"] = int(self.num_ctx)
+        extra = {"think": self.think} if self.think is not None else {}
+        response = self._client.chat(model=self.model_tag, messages=[{"role": "user", "content": prompt}],
+                                     options=options, stream=False, **extra)
+        used = response.get("prompt_eval_count") if hasattr(response, "get") else None
+        return used if used is not None else getattr(response, "prompt_eval_count", None)
 
     def _make_room(self) -> None:
         """The model did not fit: unload every other model Ollama holds (a
@@ -185,6 +233,10 @@ class OllamaModel(BaseModel):
             return (f"{where}: out of memory, the model does not fit even after unloading the other "
                     f"Ollama models and moving the detectors to the CPU ({error}). Check `nvidia-smi` "
                     "for other programs using the GPU, or replace this model with a smaller one.")
+        if "empty answer" in low:
+            return (f"{where}: it returned no answer, even with a doubled token budget ({error}). A "
+                    "reasoning model can spend its whole budget thinking on a long or hard prompt; "
+                    "raise max_tokens for this model in config.yaml.")
         if "think" in low:
             return (f"{where}: this Ollama version does not accept `think` ({error}). Update Ollama "
                     "(0.9 or newer), or remove `think` from this model in config.yaml.")
@@ -271,3 +323,25 @@ class OllamaModel(BaseModel):
 
     def __repr__(self) -> str:
         return f"OllamaModel(name={self.name!r}, model={self.model_tag!r}, family={self.family!r})"
+
+
+def unload_all(host: str) -> int:
+    """Unload every model the Ollama server holds (best effort)."""
+    try:
+        import ollama as _ollama
+        client = _ollama.Client(host=host, timeout=30)
+        loaded = client.ps().get("models", [])
+    except Exception as exc:
+        logger.debug(f"Could not list loaded Ollama models: {exc}")
+        return 0
+    count = 0
+    for entry in loaded:
+        tag = entry.get("model") or entry.get("name")
+        if not tag:
+            continue
+        try:
+            client.generate(model=tag, prompt="", keep_alive=0)
+            count += 1
+        except Exception as exc:
+            logger.debug(f"Could not unload {tag}: {exc}")
+    return count

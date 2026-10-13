@@ -12,13 +12,19 @@ hallucinated in every column):
     minicheck      minicheck
     summac         summac
     alignscore     alignscore
+
+Every family belongs to a phase ("part"): "torch" (models in this process,
+on the GPU when there is one) or "judge" (the judge model in Ollama).
+SelfCheckGPT has both: its n-gram/BERTScore/NLI scorers are torch, its
+prompt scorer is the judge. benchmark/phased.py runs the parts one after the
+other, so Ollama and the torch models never need the GPU at the same time.
 """
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 from loguru import logger
@@ -43,13 +49,33 @@ GENERATOR_FAMILIES = ("selfcheckgpt", "uqlm")
 FAMILIES = ("selfcheckgpt", "uqlm", "uqlm_judge", "minicheck", "summac", "alignscore")
 
 
+PARTS = ("torch", "judge")
+
+
 @dataclass
 class Family:
     name: str
     columns: List[str]                  # output names (without "_score")
     thresholds: Dict[str, float]
     needs_generator: bool
-    score: Callable[..., Dict[str, float]]   # (case, generator) -> {column: risk}
+    score: Callable[..., Dict[str, float]]   # (case, generator[, part]) -> {column: risk}
+    # which phase(s) produce which columns; a family built without them is
+    # one torch-phase scorer whose score() takes (case, generator) only
+    part_columns: Dict[str, List[str]] = field(default_factory=dict)
+
+    @property
+    def parts(self) -> Tuple[str, ...]:
+        return tuple(self.part_columns) if self.part_columns else ("torch",)
+
+    def columns_for(self, part: Optional[str]) -> List[str]:
+        if part is None or not self.part_columns:
+            return self.columns
+        return self.part_columns.get(part, [])
+
+    def run(self, case: dict, generator, part: Optional[str] = None) -> Dict[str, object]:
+        if part is None or not self.part_columns:
+            return self.score(case, generator)
+        return self.score(case, generator, part=part)
 
 
 def _selfcheck_scores(result) -> Dict[str, object]:
@@ -59,14 +85,31 @@ def _selfcheck_scores(result) -> Dict[str, object]:
     return out
 
 
-def _apply(row: dict, fam: "Family", values: Dict[str, object]) -> Optional[str]:
-    """Write a family's scores into `row`; columns a scorer could not
-    produce stay empty and are named in the family's error field."""
+def merge_error(row: dict, key: str, message: Optional[str]) -> None:
+    """Add `message` to row[key]; a family scored in two phases keeps both
+    phases' reasons. Setting None leaves an existing reason in place."""
+    current = row.get(key)
+    current = current if isinstance(current, str) and current.strip() else None
+    if message:
+        row[key] = f"{current}; {message}" if current and message not in current else (current or message)
+    elif key not in row:
+        row[key] = None
+
+
+def _apply(row: dict, fam: "Family", values: Dict[str, object], part: Optional[str] = None) -> Optional[str]:
+    """Write a family's scores (for one phase, or all) into `row`; columns a
+    scorer could not produce stay empty and are named in the error field."""
     partial = values.pop("__errors__", None)
-    for col in fam.columns:
+    for col in fam.columns_for(part):
         row[f"{col}_score"] = values.get(col)
-    row[f"{fam.name}_error"] = f"partial: {partial}" if partial else None
+    merge_error(row, f"{fam.name}_error", f"partial: {partial}" if partial else None)
     return partial
+
+
+def _fail(row: dict, fam: "Family", message: str, part: Optional[str] = None) -> None:
+    for col in fam.columns_for(part):
+        row[f"{col}_score"] = None
+    merge_error(row, f"{fam.name}_error", message)
 
 
 # families whose models take a `device` setting and can be moved to the CPU
@@ -102,7 +145,9 @@ class BenchmarkRunner:
         self.families: Dict[str, Family] = {}
         self._judge = config.get("judge", {})
         self._host = config.get("ollama", {}).get("host", "http://localhost:11434")
+        self._num_ctx = config.get("ollama", {}).get("num_ctx")
         self._raw: Dict[str, Callable] = {}
+        self._answer_cache: Dict[tuple, dict] = {}
         self._build(config.get("detectors", {}), self._judge, self._host)
         for name in list(self.families):
             self._guard(name)
@@ -119,28 +164,36 @@ class BenchmarkRunner:
                 n_samples=self.bank.n_samples, temperature=self.bank.temperature,
                 threshold=float(cfg.get("threshold", 0.5)), thresholds=thresholds,
                 device=cfg.get("device", "cpu"), judge_model=judge.get("model"),
-                judge_host=host, bank=self.bank,
+                judge_host=host, bank=self.bank, judge_num_ctx=self._num_ctx,
+                judge_parallel=int(self.config.get("ollama", {}).get("parallel", 1)),
             )
             self.detectors["selfcheckgpt"] = detector
+            by_part = {"torch": [m for m in methods if m != "prompt"],
+                       "judge": [m for m in methods if m == "prompt"]}
+            by_part = {part: ms for part, ms in by_part.items() if ms}
             self.families["selfcheckgpt"] = Family(
                 "selfcheckgpt", [f"selfcheckgpt_{m}" for m in methods],
                 {f"selfcheckgpt_{m}": t for m, t in thresholds.items()}, True,
-                lambda case, g, d=detector: _selfcheck_scores(
-                    d.detect(case["question"], case["context"], case["answer"], model=g)),
+                lambda case, g, part=None, d=detector, parts=by_part: _selfcheck_scores(
+                    d.detect(case["question"], case["context"], case["answer"], model=g,
+                             methods=None if part is None else parts.get(part, []))),
+                {part: [f"selfcheckgpt_{m}" for m in ms] for part, ms in by_part.items()},
             )
 
         cfg = cfgs.get("uqlm", {})
         if cfg.get("enabled", False):
             from detectors.uqlm_detector import DEFAULT_SCORERS, UQLMConsistencyDetector
             scorers = cfg.get("scorers") or list(DEFAULT_SCORERS)
-            detector = UQLMConsistencyDetector(self.bank, scorers, cfg.get("device"))
+            detector = UQLMConsistencyDetector(self.bank, scorers, cfg.get("device"),
+                                               nli_batch_size=cfg.get("nli_batch_size", 32))
             self.detectors["uqlm"] = detector
             self.families["uqlm"] = Family(
                 "uqlm", [f"uqlm_{s}" for s in scorers],
                 {f"uqlm_{s}": float(cfg.get("threshold", 0.5)) for s in scorers}, True,
-                lambda case, g, d=detector: {
+                lambda case, g, part=None, d=detector: {
                     f"uqlm_{k}": v for k, v in
                     d.detect(case["question"], case["context"], case["answer"], g).items()},
+                {"torch": [f"uqlm_{s}" for s in scorers]},
             )
 
         cfg = cfgs.get("uqlm_judge", {})
@@ -148,12 +201,14 @@ class BenchmarkRunner:
             from detectors.uqlm_detector import UQLMJudgeDetector
             if not judge.get("model"):
                 raise ValueError("uqlm_judge needs judge.model in the config")
-            detector = UQLMJudgeDetector(judge["model"], host, cfg.get("template", "true_false_uncertain"))
+            detector = UQLMJudgeDetector(judge["model"], host, cfg.get("template", "true_false_uncertain"),
+                                         num_ctx=self._num_ctx)
             self.detectors["uqlm_judge"] = detector
             self.families["uqlm_judge"] = Family(
                 "uqlm_judge", ["uqlm_judge"], {"uqlm_judge": float(cfg.get("threshold", 0.5))}, False,
-                lambda case, g, d=detector: {
+                lambda case, g, part=None, d=detector: {
                     "uqlm_judge": d.detect(case["question"], case["context"], case["answer"])},
+                {"judge": ["uqlm_judge"]},
             )
 
         for name, factory in (
@@ -176,7 +231,8 @@ class BenchmarkRunner:
                 self.detectors[name] = detector
                 self.families[name] = Family(
                     name, [name], {name: float(cfg.get("threshold", 0.5))}, False,
-                    lambda case, g, d=detector, n=name: {n: d.detect(case["context"], case["answer"]).score},
+                    lambda case, g, part=None, d=detector, n=name: {n: d.detect(case["context"], case["answer"]).score},
+                    {"torch": [name]},
                 )
 
         if not self.families:
@@ -186,15 +242,16 @@ class BenchmarkRunner:
     def _guard(self, name: str) -> None:
         """Route family `name` through out-of-memory recovery."""
         self._raw[name] = self.families[name].score
-        self.families[name].score = lambda case, g, n=name: self._call(n, case, g)
+        self.families[name].score = lambda case, g, part=None, n=name: self._call(n, case, g, part)
 
-    def _call(self, name: str, case: dict, generator) -> Dict[str, object]:
+    def _call(self, name: str, case: dict, generator, part: Optional[str] = None) -> Dict[str, object]:
         """Score one case. On a GPU out-of-memory error (Ollama may have
         loaded a large model into the memory the detector needed): free
         torch's cache and retry; if it happens again, reload this detector on
         the CPU for the rest of the run (same scores, slower) and retry."""
         def attempt() -> Dict[str, object]:
-            values = self._raw[name](case, generator)
+            values = (self._raw[name](case, generator) if part is None
+                      else self._raw[name](case, generator, part=part))
             # SelfCheckGPT isolates each scorer's error instead of raising
             if "out of memory" in str(values.get("__errors__") or "").lower():
                 raise RuntimeError(f"CUDA out of memory: {values['__errors__']}")
@@ -224,13 +281,48 @@ class BenchmarkRunner:
                 g.on_memory_pressure = self.free_gpu
 
     def free_gpu(self) -> None:
-        """Move every detector still on the GPU to the CPU for the rest of the
-        run, so Ollama can load a model that did not fit."""
-        detectors = self.config.get("detectors", {})
-        for name in [n for n in CPU_CAPABLE if n in self.families]:
-            if detectors.get(name, {}).get("device") != "cpu":
-                self._move_to_cpu(name, reason="an Ollama model needed the GPU memory")
-        _free_gpu_cache()
+        """An Ollama model did not fit: park the detectors' models in CPU
+        memory until the detectors score again (they are not reloaded)."""
+        self.park()
+
+    # ── sharing the GPU with Ollama in turns (benchmark/phased.py) ──────
+    def _torch_holders(self) -> list:
+        holders = list(getattr(self, "detectors", {}).values())
+        holders += list(getattr(self, "extra_torch_holders", []))
+        return [h for h in holders if h is not None]
+
+    def park(self) -> int:
+        """Ollama's turn: drop the detectors' torch models from GPU and
+        memory. They are loaded again from disk at the detectors' next turn
+        (~20-40 s), which keeps RAM free too: holding them in RAM instead
+        (~6 GB) got the run killed on a 12 GB machine (Colab)."""
+        released = 0
+        for holder in self._torch_holders():
+            release = getattr(holder, "release", None)
+            if callable(release):
+                release()
+                released += 1
+        if released:
+            import gc
+            gc.collect()
+            _free_gpu_cache()
+            logger.debug(f"Released the models of {released} detector(s) until their next turn")
+        return released
+
+    def unpark(self) -> int:
+        """The detectors' turn: their models load on first use."""
+        return 0
+
+    def release_judge(self) -> None:
+        """Unload the judge model from Ollama (its turn is over)."""
+        tag = (getattr(self, "_judge", None) or {}).get("model")
+        if not tag or not any("judge" in f.parts for f in self.families.values()):
+            return
+        try:
+            import ollama
+            ollama.Client(host=self._host, timeout=60).generate(model=tag, prompt="", keep_alive=0)
+        except Exception as exc:
+            logger.debug(f"Could not unload the judge {tag}: {exc}")
 
     def _move_to_cpu(self, name: str, reason: str = "GPU out of memory twice") -> None:
         cfg = dict(self.config.get("detectors", {}).get(name, {}))
@@ -259,20 +351,40 @@ class BenchmarkRunner:
         """Score columns that depend on the generator (reported per model)."""
         return [f"{col}_score" for fam in self.families.values() if fam.needs_generator for col in fam.columns]
 
-    def score_answer(self, case: dict, generator) -> Dict[str, object]:
-        """Every enabled detector on one answer: {<col>_score, <family>_error}.
-        Used by the reduction stage; a failing family does not stop the rest."""
+    def score_answer(self, case: dict, generator, part: Optional[str] = None) -> Dict[str, object]:
+        """Every enabled detector (of one phase, or all) on one answer:
+        {<col>_score, <family>_error}. Used by the reduction stage; a failing
+        family does not stop the rest. An answer identical to one already
+        scored for the same question, model and evidence (e.g. a method that
+        kept the baseline answer) reuses those scores: the detectors would
+        compute exactly the same inputs again."""
+        families = [f for f in self.families.values() if part is None or part in f.parts]
+        key = self._answer_key(case, generator, part)
+        if key is not None and key in self._answer_cache:
+            return dict(self._answer_cache[key])
         row: Dict[str, object] = {}
-        for fam in self.families.values():
+        for fam in families:
             try:
-                _apply(row, fam, fam.score(case, generator))
+                _apply(row, fam, fam.run(case, generator, part), part)
             except Exception as exc:
                 detail = str(exc).strip() or repr(exc)
-                for col in fam.columns:
-                    row[f"{col}_score"] = None
-                row[f"{fam.name}_error"] = f"{type(exc).__name__}: {detail}"
+                _fail(row, fam, f"{type(exc).__name__}: {detail}", part)
                 logger.opt(exception=exc).debug("{} failed on {}: {}", fam.name, case.get("case_id"), detail)
+        if key is not None and not any(v for k, v in row.items() if k.endswith("_error")):
+            self._answer_cache[key] = dict(row)
         return row
+
+    def _answer_key(self, case: dict, generator, part: Optional[str]):
+        if not hasattr(self, "_answer_cache"):
+            self._answer_cache = {}
+        try:
+            evidence = ()
+            if generator is not None and any(f.needs_generator for f in self.families.values()):
+                evidence = tuple(self.bank.get(generator, case["question"], case["context"]))
+            return (part, getattr(generator, "name", None), case["question"], case["context"],
+                    case["answer"], evidence)
+        except Exception:
+            return None
 
     # ── Stage A ─────────────────────────────────────────────────────────
     def validate(
@@ -324,9 +436,15 @@ class BenchmarkRunner:
         logger.debug("Saved raw detector validation to {}", output)
         return frame
 
-    def _score_all(self, rows: List[dict], families: List[Family], label: str, generator) -> None:
-        """Fill every family's columns on every row, with one progress bar
-        and a one-line outcome per family. Tracebacks go to run.log."""
+    def _score_all(self, rows: List[dict], families: List[Family], label: str, generator,
+                   part: Optional[str] = None) -> None:
+        """Fill every family's columns (of one phase, or all) on every row,
+        with one progress bar and a one-line outcome per family. Tracebacks
+        go to run.log."""
+        if part is not None:
+            families = [f for f in families if part in f.parts]
+        if not families or not rows:
+            return
         started = time.monotonic()
         failures = {f.name: 0 for f in families}
         consecutive = {f.name: 0 for f in families}
@@ -336,25 +454,25 @@ class BenchmarkRunner:
         for row in bar:
             for fam in families:
                 if consecutive[fam.name] >= MAX_CONSECUTIVE_FAILURES:
-                    for col in fam.columns:
-                        row[f"{col}_score"] = None
-                    row[f"{fam.name}_error"] = f"skipped after {MAX_CONSECUTIVE_FAILURES} consecutive failures"
+                    _fail(row, fam, f"skipped after {MAX_CONSECUTIVE_FAILURES} consecutive failures", part)
                     failures[fam.name] += 1
                     continue
                 try:
-                    partial = _apply(row, fam, fam.score(row, generator))
+                    partial = _apply(row, fam, fam.run(row, generator, part), part)
                     consecutive[fam.name] = 0
                     if partial:
                         partials[fam.name] = partials.get(fam.name, 0) + 1
-                        first_error.setdefault(fam.name, row[f"{fam.name}_error"])
+                        first_error.setdefault(fam.name, str(row[f"{fam.name}_error"]))
                 except Exception as exc:
                     detail = str(exc).strip() or repr(exc)
-                    for col in fam.columns:
-                        row[f"{col}_score"] = None
-                    row[f"{fam.name}_error"] = f"{type(exc).__name__}: {detail}"
+                    _fail(row, fam, f"{type(exc).__name__}: {detail}", part)
                     logger.opt(exception=exc).debug("{} {} failed on {}: {}", label, fam.name, row["case_id"], detail)
                     failures[fam.name] += 1
-                    consecutive[fam.name] += 1
+                    # A question whose samples could not be drawn fails every
+                    # one of its labeled answers (RAGTruth: 6); that failure is
+                    # the model's, already recorded, not a broken detector.
+                    if not detail.startswith("samples could not be drawn"):
+                        consecutive[fam.name] += 1
                     first_error.setdefault(fam.name, row[f"{fam.name}_error"])
             failed = sum(failures.values())
             if failed:

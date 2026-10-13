@@ -11,8 +11,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
+
+# Reports only write files: never use an interactive matplotlib backend (a
+# notebook host such as Colab sets MPLBACKEND to one that may not be installed
+# in a detector environment, which made `import matplotlib` fail).
+os.environ["MPLBACKEND"] = "Agg"
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -126,26 +132,22 @@ TORCH_DETECTORS = ("selfcheckgpt", "uqlm", "summac", "alignscore", "minicheck")
 
 
 def _resolve_device(device: str) -> str:
-    """`auto`: the GPU only when it is large enough to hold the detectors next
-    to Ollama's models (utils/gpu.py); otherwise the GPU is left to Ollama."""
+    """`auto`: the GPU when there is one. The detectors and Ollama take turns
+    on it (benchmark/phased.py), so even a small GPU is used for both."""
     if device != "auto":
         return device
-    from utils.gpu import AUTO_GPU_MIN_GIB, nvidia_gpu
+    from utils.gpu import nvidia_gpu
     gpu = nvidia_gpu()
-    if gpu is None:
-        try:
-            import torch
-            return "cuda" if torch.cuda.is_available() else "cpu"
-        except ImportError:
-            return "cpu"
-    name, total = gpu
-    if total < AUTO_GPU_MIN_GIB:
+    if gpu is not None:
         if not DEVICE_NOTE:
-            DEVICE_NOTE.append(
-                f"{name} has {total:.1f} GB (< {AUTO_GPU_MIN_GIB} GB): the GPU is left to Ollama, "
-                "detectors run on the CPU (same scores, slower; --device cuda to override)")
+            DEVICE_NOTE.append(f"{gpu[0]} ({gpu[1]:.1f} GB): detectors on the GPU, taking turns with "
+                               "Ollama (generate → detectors → judge per model)")
+        return "cuda"
+    try:
+        import torch
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except ImportError:
         return "cpu"
-    return "cuda"
 
 
 SMOKE = {"runs": 2, "max_samples": 2, "n_samples": 2, "max_iterations": 1}
@@ -199,9 +201,9 @@ def apply_plan(config: dict, args: argparse.Namespace) -> dict:
     for name in TORCH_DETECTORS:
         wanted = args.device or detectors_cfg[name].get("device", "auto")
         detectors_cfg[name]["device"] = _resolve_device(wanted)
-    # Detectors on the CPU: hide the GPU from this process, so libraries that
-    # pick the GPU by themselves (UQLM's cosine model, MiniCheck) cannot take
-    # memory Ollama needs. Ollama is a separate process and keeps the GPU.
+    # Detectors explicitly on the CPU: hide the GPU from this process, so
+    # libraries that pick the GPU by themselves (MiniCheck) do not use it.
+    # Ollama is a separate process and keeps the GPU.
     if all(detectors_cfg[n]["device"] == "cpu" for n in TORCH_DETECTORS if n in selected):
         import os
         from utils.gpu import nvidia_gpu
@@ -343,13 +345,26 @@ def run_once(run_dir: Path, run_label: str, config: dict, runner, datasets, gene
     coverage = {}
     run_dir.mkdir(parents=True, exist_ok=True)
     runner.output_dir = run_dir
+    runner._answer_cache = {}     # identical answers share scores only within one run
     run_config = {**config, "benchmark": {**config["benchmark"], "output_dir": str(run_dir)}}
 
     total_stages = 2 if (reduce_on or score_reduction_from) else 1
-    console.section(f"{run_label} · Stage 1/{total_stages} · Detector validation")
-    stage_start = time.monotonic()
-    raw = runner.validate(datasets, generators=generators or None)
-    stage_seconds["detector_validation"] = time.monotonic() - stage_start
+    phased = bool(generators) and bool(runner.generator_columns())
+    reduction = reducer = None
+    if phased:
+        from benchmark.phased import run_phased
+        console.section(f"{run_label} · Stage A{' + B' if reduce_on else ''} · per model: "
+                        "generate → detectors → judge")
+        reducer = ReductionRunner(run_config, runner) if reduce_on else None
+        if reducer is not None and getattr(reducer, "_best", None) is not None:
+            runner.extra_torch_holders = [reducer._best]
+        raw, reduction, phase_seconds = run_phased(runner, datasets, generators, reducer)
+        stage_seconds.update(phase_seconds)
+    else:
+        console.section(f"{run_label} · Stage 1/{total_stages} · Detector validation")
+        stage_start = time.monotonic()
+        raw = runner.validate(datasets, generators=generators or None)
+        stage_seconds["detector_validation"] = time.monotonic() - stage_start
     score_columns = [f"{col}_score" for fam in runner.families.values() for col in fam.columns]
     cases = [case for group in datasets.values() for case in DatasetLoader.detection_cases(group)]
     n_cases = len(cases)
@@ -373,11 +388,13 @@ def run_once(run_dir: Path, run_label: str, config: dict, runner, datasets, gene
     console.line("auroc/auprc are threshold-free; the other columns use the threshold shown.")
 
     if reduce_on:
-        console.section(f"{run_label} · Stage 2/2 · Reduction "
-                        f"(baseline vs. {', '.join(config['reduction'].get('methods', []))})")
-        stage_start = time.monotonic()
-        reducer = ReductionRunner(run_config, runner)
-        reduction = reducer.run(datasets, generators)
+        if reduction is None:
+            console.section(f"{run_label} · Stage 2/2 · Reduction "
+                            f"(baseline vs. {', '.join(config['reduction'].get('methods', []))})")
+            stage_start = time.monotonic()
+            reducer = ReductionRunner(run_config, runner)
+            reduction = reducer.run(datasets, generators)
+            stage_seconds["reduction"] = time.monotonic() - stage_start
         n_conditions = len(reducer.conditions())
         n_questions = sum(len(group) for group in datasets.values())
         coverage["reduction"] = inspect_scores(reduction.to_dict("records"), score_columns,
@@ -385,7 +402,6 @@ def run_once(run_dir: Path, run_label: str, config: dict, runner, datasets, gene
                                                ("sample_id", "model", "condition"),
                                                [(sample.sample_id, g.name, cond) for group in datasets.values()
                                                 for sample in group for g in generators for cond in reducer.conditions()])
-        stage_seconds["reduction"] = time.monotonic() - stage_start
         console.section(f"{run_label} · Reduction results")
         print_reduction(reduction, runner)
     elif score_reduction_from:
@@ -404,6 +420,10 @@ def run_once(run_dir: Path, run_label: str, config: dict, runner, datasets, gene
     if runner.generator_columns():
         runner.bank.export(run_dir / "selfcheckgpt_samples.jsonl")
     coverage["passed"] = all(stage["passed"] for stage in coverage.values())
+    truncated = {g.name: g.truncated for g in generators if getattr(g, "truncated", 0)}
+    if truncated:
+        coverage["prompts_possibly_cut"] = truncated
+        logger.warning(f"Prompts that may not have fit ollama.num_ctx: {truncated}")
     (run_dir / "score_completeness.json").write_text(json.dumps(coverage, indent=2), encoding="utf-8")
     write_run_files(run_dir, run_config, sys.argv, datasets, generators, started_at, stage_seconds)
     if make_report:
@@ -414,7 +434,11 @@ def run_once(run_dir: Path, run_label: str, config: dict, runner, datasets, gene
         raise SystemExit(f"Incomplete scores in {run_label}; this run FAILED. "
                          f"See {run_dir / 'score_completeness.json'} and run.log. "
                          "Recorded results are retained for diagnosis.")
-    console.line(f"✓ {run_label} · every expected score is present and finite")
+    recorded = sum(int(stage.get("rows_with_missing_scores") or 0)
+                   for stage in coverage.values() if isinstance(stage, dict))
+    console.line(f"✓ {run_label} · every expected row is present"
+                 + (f"; {recorded} row(s) with a recorded failure (listed in score_completeness.json)"
+                    if recorded else " and every score is finite"))
     return stage_seconds
 
 
@@ -437,7 +461,8 @@ def score_reduction_answers(source: Path, output: Path, runner, datasets) -> pd.
             continue
         case = {"case_id": f"{item.sample_id}:{item.condition}", "question": sample.question,
                 "context": sample.context, "answer": item.answer}
-        rows.append({**key, **runner.score_answer(case, None)})
+        values = runner.score_answer(case, None)
+        rows.append({**key, **values})
     bar.close()
     frame = pd.DataFrame(rows)
     frame.to_csv(output, index=False)
@@ -608,6 +633,16 @@ def main() -> None:
     from benchmark import BenchmarkRunner
     from benchmark.preflight import run_preflight
 
+    # Start with an empty GPU: unload whatever Ollama still holds (a judge
+    # left loaded by an earlier step, a crashed run). Every model this run
+    # needs is loaded again when its turn comes.
+    try:
+        from models.ollama_model import unload_all
+        unloaded = unload_all(config.get("ollama", {}).get("host", "http://localhost:11434"))
+        if unloaded:
+            logger.debug(f"Unloaded {unloaded} model(s) Ollama still held")
+    except Exception as exc:      # best effort: never a reason to stop
+        logger.debug(f"Could not unload Ollama models: {exc}")
     runner = BenchmarkRunner(config, generator=generators[0] if generators else None)
     runner.attach(generators)   # a model that does not fit can take the detectors' GPU memory
     if not args.skip_preflight:

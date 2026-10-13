@@ -38,7 +38,7 @@ from typing import Dict, List
 import pandas as pd
 from loguru import logger
 
-from benchmark.runner import MAX_CONSECUTIVE_FAILURES
+from benchmark.runner import MAX_CONSECUTIVE_FAILURES, merge_error
 from data.datasets import BenchmarkSample
 from models.base_model import BaseModel
 from models.prompts import closed_book_prompt, grounded_prompt
@@ -81,8 +81,9 @@ class ReductionRunner:
             from reducers.uqlm_best_response import UQLMBestResponseReducer
             device = config.get("detectors", {}).get("uqlm", {}).get("device")
             uqlm = getattr(runner, "detectors", {}).get("uqlm")
-            nli = uqlm.shared_nli() if uqlm is not None and hasattr(uqlm, "shared_nli") else None
-            self._best = UQLMBestResponseReducer(device=device, nli=nli)
+            provider = uqlm.shared_nli if uqlm is not None and hasattr(uqlm, "shared_nli") else None
+            # the same NLI weights as UQLM's scorers, looked up when first needed
+            self._best = UQLMBestResponseReducer(device=device, nli_provider=provider)
 
     def conditions(self) -> List[str]:
         return ["baseline", *self.methods]
@@ -91,6 +92,50 @@ class ReductionRunner:
         """Every condition's answer for one question. A failure is recorded
         on that condition only; methods that start from the baseline are
         skipped (with the reason) when the baseline itself failed."""
+        out = self.produce_generated(model, sample)
+        self.select_best(model, sample, out)
+        return out
+
+    @staticmethod
+    def _run_into(out: Dict[str, dict], name: str, fn, model, sample) -> None:
+        start = time.monotonic()
+        try:
+            answer, calls, details = fn()
+            if not isinstance(answer, str) or not answer.strip():
+                raise ValueError("generator/reducer returned an empty answer")
+            out[name] = {"answer": answer, "n_calls": calls, "details": details, "error": None,
+                         "latency_seconds": time.monotonic() - start}
+        except Exception as exc:
+            detail = str(exc).strip() or repr(exc)
+            out[name] = {"answer": None, "n_calls": None, "details": None,
+                         "error": f"{type(exc).__name__}: {detail}",
+                         "latency_seconds": time.monotonic() - start}
+            logger.opt(exception=exc).debug("{} failed for {} ({}): {}", name, sample.sample_id, model.name, detail)
+
+    def select_best(self, model: BaseModel, sample: BenchmarkSample, out: Dict[str, dict]) -> None:
+        """uqlm_best_response: needs only the baseline and the samples (no
+        generation), and the NLI model, so the phased run does it in the
+        detectors' turn on the GPU."""
+        if "uqlm_best_response" not in self.methods:
+            return
+        baseline = (out.get("baseline") or {}).get("answer")
+        if baseline is None:
+            out["uqlm_best_response"] = {"answer": None, "n_calls": 0, "details": None, "latency_seconds": 0.0,
+                                         "error": "skipped: baseline answer failed"}
+            return
+        q, c = sample.question, sample.context
+
+        def best():
+            samples = self.runner.bank.get(model, q, c)
+            chosen = self._best.select(baseline, samples)
+            candidates = [baseline, *samples]
+            return chosen, 0, {"chosen_index": candidates.index(chosen) if chosen in candidates else None,
+                               "n_candidates": len(candidates)}
+        self._run_into(out, "uqlm_best_response", best, model, sample)
+
+    def produce_generated(self, model: BaseModel, sample: BenchmarkSample) -> Dict[str, dict]:
+        """Every condition that needs the generator (all but
+        uqlm_best_response), in the configured order."""
         from reducers.cove import ChainOfVerificationReducer
         from reducers.self_refine import SelfRefineReducer
 
@@ -114,9 +159,11 @@ class ReductionRunner:
 
         run("baseline", lambda: (model.generate(grounded_prompt(q, c)), 1, {}))
         baseline = out["baseline"]["answer"]
-        needs_baseline = {"self_refine_adapted", "cove_adapted", "uqlm_best_response"}
+        needs_baseline = {"self_refine_adapted", "cove_adapted"}
 
         for name in self.methods:
+            if name == "uqlm_best_response":
+                continue      # select_best
             if name in needs_baseline and baseline is None:
                 out[name] = {"answer": None, "n_calls": 0, "details": None, "latency_seconds": 0.0,
                              "error": "skipped: baseline answer failed"}
@@ -132,26 +179,21 @@ class ReductionRunner:
                     return result.final_answer, 2 * len(result.feedback_history) - (
                         1 if result.stopped_reason == "no_issues_reported" else 0), {
                         "iterations": result.iterations, "stopped_reason": result.stopped_reason,
-                        "feedback_history": result.feedback_history}
+                        "feedback_history": result.feedback_history,
+                        "commentary_removed": result.commentary_removed}
                 run(name, self_refine)
             elif name == "cove_adapted":
                 def cove():
                     result = ChainOfVerificationReducer(model).reduce(q, c, baseline)
                     return result.final_answer, result.n_calls, {
                         "verification_questions": result.verification_questions,
-                        "verification_answers": result.verification_answers}
+                        "verification_answers": result.verification_answers,
+                        "commentary_removed": result.commentary_removed}
                 run(name, cove)
-            elif name == "uqlm_best_response":
-                def best():
-                    samples = self.runner.bank.get(model, q, c)
-                    chosen = self._best.select(baseline, samples)
-                    candidates = [baseline, *samples]
-                    return chosen, 0, {"chosen_index": candidates.index(chosen) if chosen in candidates else None,
-                                       "n_candidates": len(candidates)}
-                run(name, best)
         return out
 
-    def _score(self, case: dict, model, cond: str, item: dict, answers: Dict[str, dict]) -> dict:
+    def _score(self, case: dict, model, cond: str, item: dict, answers: Dict[str, dict],
+               part: str | None = None) -> dict:
         """Score one answer with every detector. An answer that
         uqlm_best_response picked FROM the samples would otherwise be scored
         against evidence that contains itself (a perfect match, biasing it
@@ -164,8 +206,11 @@ class ReductionRunner:
         # index 0: the baseline itself was picked, scored like the baseline.
         # index None (not found verbatim among the candidates) is still
         # scored without any exact copy of itself, like a picked sample.
+        def score():
+            return (self.runner.score_answer(case, model) if part is None
+                    else self.runner.score_answer(case, model, part=part))
         if cond != "uqlm_best_response" or index == 0:
-            return self.runner.score_answer(case, model)
+            return score()
         samples = self.runner.bank.get(model, case["question"], case["context"])
         chosen = case["answer"]
         # UQLM prefers the most repeated answer, so the pick often has exact
@@ -174,7 +219,60 @@ class ReductionRunner:
         if not others:
             raise ValueError("no evidence left after removing the picked answer's copies")
         with self.runner.bank.evidence(model, case["question"], case["context"], others):
-            return self.runner.score_answer(case, model)
+            return score()
+
+    # ── rows, and scoring them one phase at a time (benchmark/phased.py) ─
+    def rows_for(self, model: BaseModel, sample: BenchmarkSample, answers: Dict[str, dict]) -> List[dict]:
+        """One output row per condition (scores are added by score_rows)."""
+        rows = []
+        base = {"sample_id": sample.sample_id, "dataset": sample.dataset, "model": model.name,
+                "question": sample.question}
+        for cond in self.conditions():
+            item = answers[cond]
+            rows.append({**base, "condition": cond, "reproduction_status": CONDITIONS[cond],
+                         "answer": item["answer"], "n_calls": item["n_calls"],
+                         "latency_seconds": item["latency_seconds"],
+                         "details": json.dumps(item["details"], ensure_ascii=False) if item["details"] else None,
+                         "error": item["error"]})
+        return rows
+
+    def score_rows(self, rows: List[dict], model: BaseModel, samples: Dict[str, BenchmarkSample],
+                   answers: Dict[str, Dict[str, dict]], part: str | None, label: str) -> None:
+        """Add one phase's detector scores to reduction rows (in place)."""
+        todo = [row for row in rows if row.get("answer") is not None]
+        if not todo:
+            return
+        started = time.monotonic()
+        failed = 0
+        bar = console.progress(todo, desc=f"{label:<26}", total=len(todo), unit="answer")
+        for row in bar:
+            sample = samples[row["sample_id"]]
+            cond = row["condition"]
+            case = {"case_id": f"{sample.sample_id}:{cond}", "question": sample.question,
+                    "context": sample.context, "answer": row["answer"]}
+            try:
+                values = self._score(case, model, cond, answers[sample.sample_id][cond],
+                                     answers[sample.sample_id], part)
+            except Exception as exc:
+                merge_error(row, "error", f"{type(exc).__name__}: {str(exc).strip() or repr(exc)}")
+                logger.opt(exception=exc).debug("Scoring {} failed for {} ({})", cond, sample.sample_id, model.name)
+                failed += 1
+                bar.set_postfix_str(f"failed={failed}")
+                continue
+            for key, value in values.items():
+                if key.endswith("_error"):
+                    merge_error(row, key, value)
+                else:
+                    row[key] = value
+            if any(values.get(k) for k in values if k.endswith("_error")):
+                failed += 1
+                bar.set_postfix_str(f"failed={failed}")
+        bar.close()
+        elapsed = console.duration(time.monotonic() - started)
+        if failed:
+            logger.warning(f"{label.strip()}: {failed}/{len(todo)} reduction answers not fully scored in {elapsed}")
+        else:
+            console.line(f"✓ {label.strip()} · {len(todo)} reduction answers in {elapsed}")
 
     def run(self, datasets: Dict[str, List[BenchmarkSample]], generators: List[BaseModel]) -> pd.DataFrame:
         samples = [sample for group in datasets.values() for sample in group]

@@ -34,13 +34,23 @@ class UQLMBestResponseReducer:
     REPRODUCTION_STATUS = "official_uqlm_implementation"
     SOURCE_PAPER = "https://arxiv.org/abs/2507.06196"
 
-    def __init__(self, device: Optional[str] = None, nli=None):
+    def __init__(self, device: Optional[str] = None, nli=None, nli_provider=None):
         self.device = device
         self.nli = nli          # reuse an already loaded UQLM NLI model (same weights)
+        # or ask for it when needed (the run releases and reloads UQLM's models)
+        self.nli_provider = nli_provider
         self._se = None
+
+    def release(self) -> None:
+        """Drop the models from memory; loaded again on next use."""
+        self._se = None
+        if self.nli_provider is not None:
+            self.nli = None
 
     def _load(self):
         if self._se is None:
+            if self.nli is None and self.nli_provider is not None:
+                self.nli = self.nli_provider()
             try:
                 from uqlm import SemanticEntropy
             except ImportError as exc:

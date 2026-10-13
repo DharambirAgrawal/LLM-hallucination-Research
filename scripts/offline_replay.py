@@ -82,7 +82,7 @@ def verify_report(folder, models, expected_runs):
     assert not any("latency" in p.name.lower() for p in (folder / "charts").glob("*.png"))
     html = (folder / "report.html").read_text(encoding="utf-8")
     assert "SYNTHETIC OFFLINE REPLAY" in html
-    assert "All expected answer rows and finite detector scores passed" in html
+    assert "every detector score is present and finite" in html
     assert "FAILED · incomplete scores" not in html
     assert len(re.findall(r"<figure>", html)) >= len(pngs)
     with ZipFile(folder / "report.docx") as archive:
@@ -91,7 +91,7 @@ def verify_report(folder, models, expected_runs):
         ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
         text = "\n".join(node.text or "" for node in xml.findall(".//w:t", ns))
         assert "SYNTHETIC OFFLINE REPLAY" in text
-        assert "All expected answer rows and finite detector scores passed" in text
+        assert "every detector score is present and finite" in text
         from reporting.build import pretty
         for model in models:
             for detector in scores.detector.unique():
