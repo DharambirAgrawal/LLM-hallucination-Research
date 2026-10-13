@@ -517,8 +517,10 @@ watch memory with `nvidia-smi` and see which model Ollama holds with
 ### Faster: parallel requests (`ollama.parallel`)
 
 The run sends up to `ollama.parallel` requests (default 2) to Ollama at once:
-the 5 samples of a question, and SelfCheckGPT's prompt-scorer checks (about
-150,000 short judge calls per run). The Ollama server answers them together
+two questions at a time in the generate turn (and the 5 samples of a
+question), and SelfCheckGPT's prompt-scorer checks (about 150,000 short judge
+calls per run, grouped so that consecutive checks share their long beginning,
+which Ollama then reuses instead of reading it again). The Ollama server answers them together
 only if it is allowed to; otherwise it queues them (no harm, no gain). On the
 GPU machine, once:
 
@@ -527,10 +529,15 @@ sudo systemctl edit ollama
 # add these two lines, save, close:
 #   [Service]
 #   Environment="OLLAMA_NUM_PARALLEL=2"
+#   Environment="OLLAMA_FLASH_ATTENTION=1"
 sudo systemctl restart ollama
 ```
 
-(If Ollama is not a system service, start it with `OLLAMA_NUM_PARALLEL=2 ollama serve`.)
+(If Ollama is not a system service, start it with
+`OLLAMA_NUM_PARALLEL=2 OLLAMA_FLASH_ATTENTION=1 ollama serve`.) Flash
+attention computes the same attention with less memory and time; it does not
+approximate anything. Do not set `OLLAMA_KV_CACHE_TYPE`: quantizing the cache
+would change the models' outputs slightly.
 Keep it at 2 on an 8 GB GPU: each parallel slot reserves its own context
 window of memory. The scores do not depend on this setting.
 

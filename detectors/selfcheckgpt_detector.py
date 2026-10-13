@@ -225,23 +225,44 @@ class SelfCheckGPTDetector:
         return response["message"]["content"] or ""
 
     def _prefetch_judge(self, scorer, sentences: List[str], samples: List[str]) -> None:
-        """Send the prompts upstream predict() is about to send, `judge_parallel`
-        at a time, so its sequential completion() calls find the answers in
-        memory. Built exactly as upstream builds them (newlines in a sample
-        become spaces); a prompt built differently would just be sent again by
-        upstream, so this can only save time, never change a score."""
+        """Send the prompts upstream predict() is about to send, in an order
+        that is fast for Ollama, so its sequential completion() calls find the
+        answers in memory.
+
+        Upstream loops sentence by sentence over the samples, and its prompt
+        starts with the sample ("Context: {sample}\\n\\nSentence: ..."), so
+        every request starts with different text. Grouped by sample, the
+        requests of one group share that long beginning, which Ollama reuses
+        from the previous request instead of reading it again. Up to
+        `judge_parallel` groups run at once (one per Ollama slot). Prompts are
+        built exactly as upstream builds them (newlines in a sample become
+        spaces); one built differently would just be sent again by upstream,
+        so this can only save time, never change a score."""
         template = getattr(scorer, "prompt_template", None)
-        if self.judge_parallel < 2 or not template:
+        if not template:
             return
-        prompts = list(dict.fromkeys(template.format(context=sample.replace("\n", " "), sentence=sentence)
-                                     for sentence in sentences for sample in samples))
+        groups = []
         with self._judge_lock:
-            missing = [p for p in prompts if p not in self._judge_cache]
-        if len(missing) < 2:
+            for sample in dict.fromkeys(samples):
+                context = sample.replace("\n", " ")
+                group = [p for p in dict.fromkeys(template.format(context=context, sentence=sentence)
+                                                  for sentence in sentences)
+                         if p not in self._judge_cache]
+                if group:
+                    groups.append(group)
+        if not groups:
+            return
+
+        def send(group):
+            for prompt in group:
+                self._judge_completion(prompt)
+        if self.judge_parallel < 2 or len(groups) < 2:
+            for group in groups:
+                send(group)
             return
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=self.judge_parallel) as pool:
-            list(pool.map(self._judge_completion, missing))
+            list(pool.map(send, groups))
 
     def _sentences(self, answer: str) -> List[str]:
         """Split the response the way the upstream README does:

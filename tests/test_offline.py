@@ -701,6 +701,8 @@ class PhasedRunTests(unittest.TestCase):
         events = self.events
 
         class Recorded(ScriptedChatModel):
+            parallel = 2        # the generate turn runs 2 questions at a time
+
             def generate(self, prompt, **kwargs):
                 events.append("generate")
                 return super().generate(prompt, **kwargs)

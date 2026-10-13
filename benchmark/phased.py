@@ -41,43 +41,69 @@ from utils import console
 
 
 def _generate(runner, reducer, model, samples: List[BenchmarkSample], label: str) -> Dict[str, Dict[str, dict]]:
-    """Phase 1: everything that needs the generator, question by question."""
+    """Phase 1: everything that needs the generator. Questions run
+    `ollama.parallel` at a time (model.parallel), so the Ollama server's
+    parallel slots are used here too; each question's own steps stay in
+    order (self-refine and CoVe start from that question's baseline)."""
     answers: Dict[str, Dict[str, dict]] = {}
     started = time.monotonic()
     failures = consecutive = 0
     first_error = None
     sampling = bool(runner.generator_columns())
-    bar = console.progress(samples, desc=f"{label + ' · generate':<26}", total=len(samples), unit="question")
-    for sample in bar:
-        if consecutive >= MAX_CONSECUTIVE_FAILURES:
-            reason = f"skipped after {MAX_CONSECUTIVE_FAILURES} consecutive failures"
-            runner.bank.mark_failed(model, sample.question, sample.context, reason)
-            if reducer is not None:
-                answers[sample.sample_id] = {cond: {"answer": None, "n_calls": 0, "details": None,
-                                                    "latency_seconds": 0.0, "error": reason}
-                                             for cond in reducer.conditions()}
-            failures += 1
-            continue
-        failed = False
+    workers = max(1, int(getattr(model, "parallel", 1) or 1))
+
+    def work(sample):
+        failed, error, produced = False, None, None
         if sampling:
             try:
                 runner.bank.get(model, sample.question, sample.context)
             except Exception as exc:
-                failed = True
-                first_error = first_error or f"samples: {exc}"
+                failed, error = True, f"samples: {exc}"
         if reducer is not None:
             produced = reducer.produce_generated(model, sample)
-            answers[sample.sample_id] = produced
             if produced["baseline"]["error"]:
                 failed = True
-                first_error = first_error or f"baseline: {produced['baseline']['error']}"
-        if failed:
-            failures += 1
-            consecutive += 1
-            bar.set_postfix_str(f"failed={failures}")
-        else:
-            consecutive = 0
-    bar.close()
+                error = error or f"baseline: {produced['baseline']['error']}"
+        return failed, error, produced
+
+    pool = None
+    if workers > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        pool = ThreadPoolExecutor(max_workers=workers)
+    bar = console.progress(None, desc=f"{label + ' · generate':<26}", total=len(samples), unit="question")
+    try:
+        for start in range(0, len(samples), workers):
+            wave = samples[start:start + workers]
+            if consecutive >= MAX_CONSECUTIVE_FAILURES:
+                todo, results = [], []
+                skipped = wave
+            else:
+                todo, skipped = wave, []
+                results = list(pool.map(work, todo)) if pool else [work(s) for s in todo]
+            for sample in skipped:
+                reason = f"skipped after {MAX_CONSECUTIVE_FAILURES} consecutive failures"
+                runner.bank.mark_failed(model, sample.question, sample.context, reason)
+                if reducer is not None:
+                    answers[sample.sample_id] = {cond: {"answer": None, "n_calls": 0, "details": None,
+                                                        "latency_seconds": 0.0, "error": reason}
+                                                 for cond in reducer.conditions()}
+                failures += 1
+            for sample, (failed, error, produced) in zip(todo, results):
+                if produced is not None:
+                    answers[sample.sample_id] = produced
+                if failed:
+                    failures += 1
+                    consecutive += 1
+                    first_error = first_error or error
+                else:
+                    consecutive = 0
+            bar.update(len(wave))
+            if failures:
+                bar.set_postfix_str(f"failed={failures}")
+    finally:
+        bar.close()
+        if pool is not None:
+            pool.shutdown()
     elapsed = console.duration(time.monotonic() - started)
     if failures:
         logger.warning(f"{label} · generate: {failures}/{len(samples)} questions had a failure in {elapsed}"
